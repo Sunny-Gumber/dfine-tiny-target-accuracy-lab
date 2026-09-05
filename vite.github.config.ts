@@ -1,5 +1,6 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
+import { fileURLToPath, URL } from "node:url";
 
 export default defineConfig({
   base: "/dfine-tiny-target-accuracy-lab/",
@@ -7,5 +8,11 @@ export default defineConfig({
   build: {
     outDir: "dist-github",
     emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        main: fileURLToPath(new URL("./index.html", import.meta.url)),
+        live: fileURLToPath(new URL("./live.html", import.meta.url)),
+      },
+    },
   },
 });
