@@ -1,5 +1,5 @@
 export type SourceMode = "image" | "video" | "camera";
-export type ModelKey = "dfine-s" | "dfine-n" | "rtdetr-r18";
+export type ModelKey = "dfine-s" | "dfine-n" | "rfdetr-n" | "rtdetr-r18";
 export type ScanMode = "fast" | "precision";
 export type DetectionFilter = "both" | "human" | "vehicle";
 export type Backend = "webgpu" | "wasm";
@@ -61,6 +61,12 @@ export const MODELS = {
     id: "onnx-community/dfine_n_coco-ONNX",
     note: "Faster D-FINE · 4M parameters · 42.8 COCO AP",
     badge: "Faster",
+  },
+  "rfdetr-n": {
+    name: "RF-DETR-Nano",
+    id: "onnx-community/rfdetr_nano-ONNX",
+    note: "Real-time transformer · 30.5M parameters · 48.4 COCO AP",
+    badge: "New test",
   },
   "rtdetr-r18": {
     name: "RT-DETRv2-R18",
