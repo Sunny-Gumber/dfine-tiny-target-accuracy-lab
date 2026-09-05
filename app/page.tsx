@@ -43,6 +43,8 @@ import {
   detectFrame,
   getPreferredBackend,
   isBackendCompatibilityError,
+  isMobileDevice,
+  MOBILE_MODEL_KEY,
   MODELS,
   ModelKey,
   ScanMode,
@@ -232,12 +234,10 @@ export default function Home() {
     const frame = window.requestAnimationFrame(() => {
       const preferred = getPreferredBackend();
       setBackend(preferred);
-      if (
-        preferred === "wasm" &&
-        /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
-      ) {
+      if (isMobileDevice()) {
+        setModelKey(MOBILE_MODEL_KEY);
         setFallbackNotice(
-          "Mobile-safe WASM mode selected. Detection accuracy is unchanged; inference may take longer.",
+          "Mobile-compatible RT-DETRv2-R18 selected. It avoids the D-FINE MaxPool operation that this phone's browser runtime cannot execute.",
         );
       }
     });
@@ -296,8 +296,11 @@ export default function Home() {
     setError("");
   }, []);
 
-  const ensureDetector = useCallback(async (requestedBackend = backend): Promise<Detector> => {
-    const identity = modelKey + ":" + requestedBackend;
+  const ensureDetector = useCallback(async (
+    requestedBackend = backend,
+    requestedModelKey = modelKey,
+  ): Promise<Detector> => {
+    const identity = requestedModelKey + ":" + requestedBackend;
     if (detectorRef.current && detectorIdentityRef.current === identity) {
       return detectorRef.current;
     }
@@ -312,7 +315,7 @@ export default function Home() {
     setError("");
     detectorIdentityRef.current = identity;
 
-    const promise = createDetector(modelKey, requestedBackend, (progress) => {
+    const promise = createDetector(requestedModelKey, requestedBackend, (progress) => {
       if (loadId !== modelLoadIdRef.current) return;
       if (typeof progress.progress === "number") {
         const value =
@@ -343,7 +346,9 @@ export default function Home() {
         caught instanceof Error ? caught.message : "The AI model could not load.";
       throw new Error(
         message +
-          " Check the internet connection, then try D-FINE-N or reload the page.",
+          (requestedModelKey === MOBILE_MODEL_KEY
+            ? " Check the internet connection, then reload the page."
+            : " This browser may not support the D-FINE graph; try RT-DETRv2-R18."),
       );
     }
   }, [backend, modelKey]);
@@ -392,10 +397,16 @@ export default function Home() {
 
     try {
       const frame = captureFrame();
-      let detector = await ensureDetector();
-      setAnalysisState("analysing");
-      const runDetection = (activeDetector: Detector) =>
-        detectFrame({
+      const runDetection = async (
+        requestedModelKey: ModelKey,
+        requestedBackend: Backend,
+      ) => {
+        const activeDetector = await ensureDetector(
+          requestedBackend,
+          requestedModelKey,
+        );
+        setAnalysisState("analysing");
+        return detectFrame({
           detector: activeDetector,
           frame,
           mode: scanMode,
@@ -404,31 +415,37 @@ export default function Home() {
           onPass: (completed, total, name) =>
             setPassProgress({ completed, total, name }),
         });
+      };
 
       let result: Awaited<ReturnType<typeof detectFrame>>;
       try {
-        result = await runDetection(detector);
+        result = await runDetection(modelKey, backend);
       } catch (initialError) {
-        if (backend !== "webgpu" || !isBackendCompatibilityError(initialError)) {
+        if (
+          modelKey === MOBILE_MODEL_KEY ||
+          !isBackendCompatibilityError(initialError)
+        ) {
           throw initialError;
         }
 
         setFallbackNotice(
-          "WebGPU could not run this D-FINE operation. The same frame was retried automatically with mobile-safe WASM.",
+          "D-FINE is not supported by this browser runtime. This frame is being retried with RT-DETRv2-R18 on mobile-safe WASM.",
         );
         try {
-          await detector.dispose?.();
+          await detectorRef.current?.dispose?.();
         } catch {
-          // A failed WebGPU session may already be closed.
+          // A failed inference session may already be closed.
         }
         modelLoadIdRef.current += 1;
         detectorRef.current = null;
         detectorIdentityRef.current = "";
         detectorPromiseRef.current = null;
         setBackend("wasm");
-        detector = await ensureDetector("wasm");
-        setAnalysisState("analysing");
-        result = await runDetection(detector);
+        setModelKey(MOBILE_MODEL_KEY);
+        setModelState("idle");
+        setModelProgress(0);
+        setModelFile("");
+        result = await runDetection(MOBILE_MODEL_KEY, "wasm");
       }
       setDetections(result.detections);
       setPassCount(result.passCount);
@@ -442,7 +459,7 @@ export default function Home() {
       analysisLockRef.current = false;
       setAnalysisState("idle");
     }
-  }, [backend, captureFrame, ensureDetector, filter, scanMode, threshold]);
+  }, [backend, captureFrame, ensureDetector, filter, modelKey, scanMode, threshold]);
 
   useEffect(() => {
     if (!running || mode === "image") return;
@@ -907,8 +924,9 @@ export default function Home() {
               ))}
             </div>
             <p className="mt-3 text-[11px] leading-5 text-slate-500">
-              D-FINE-S is the accuracy test. Choose D-FINE-N when a phone cannot
-              run the larger model comfortably.
+              D-FINE-S is the desktop accuracy test. Phones automatically use
+              RT-DETRv2-R18 because its deployment graph is compatible with the
+              browser&apos;s mobile WASM engine.
             </p>
           </Panel>
 
@@ -1010,7 +1028,7 @@ export default function Home() {
                 },
                 {
                   step: "03",
-                  title: "D-FINE inference",
+                  title: model.name + " inference",
                   text: "A transformer predicts classes, confidence and box coordinates.",
                   active: modelState === "ready",
                 },
@@ -1259,8 +1277,9 @@ export default function Home() {
                   1
                 </span>
                 <p>
-                  <strong className="text-slate-200">D-FINE-S</strong> is more
-                  accurate than the earlier DETR-R50 baseline while using fewer parameters.
+                  <strong className="text-slate-200">D-FINE-S</strong> remains
+                  the desktop accuracy choice. <strong className="text-slate-200">RT-DETRv2-R18</strong>{" "}
+                  provides the compatible mobile path when D-FINE cannot execute.
                 </p>
               </div>
               <div className="flex gap-3">

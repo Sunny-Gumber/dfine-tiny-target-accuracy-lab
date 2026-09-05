@@ -1,5 +1,5 @@
 export type SourceMode = "image" | "video" | "camera";
-export type ModelKey = "dfine-s" | "dfine-n";
+export type ModelKey = "dfine-s" | "dfine-n" | "rtdetr-r18";
 export type ScanMode = "fast" | "precision";
 export type DetectionFilter = "both" | "human" | "vehicle";
 export type Backend = "webgpu" | "wasm";
@@ -59,10 +59,18 @@ export const MODELS = {
   "dfine-n": {
     name: "D-FINE-N",
     id: "onnx-community/dfine_n_coco-ONNX",
-    note: "Mobile first · 4M parameters · 42.8 COCO AP",
+    note: "Faster D-FINE · 4M parameters · 42.8 COCO AP",
     badge: "Faster",
   },
+  "rtdetr-r18": {
+    name: "RT-DETRv2-R18",
+    id: "onnx-community/rtdetr_v2_r18vd-ONNX",
+    note: "Mobile fallback · deployment-safe DETR · quantized WASM",
+    badge: "Mobile",
+  },
 } as const;
+
+export const MOBILE_MODEL_KEY: ModelKey = "rtdetr-r18";
 
 const HUMAN_LABELS = new Set(["person"]);
 const VEHICLE_LABELS = new Set([
@@ -76,13 +84,17 @@ const VEHICLE_LABELS = new Set([
 const CDN_MODULE =
   "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1";
 
+export function isMobileDevice(): boolean {
+  return (
+    typeof navigator !== "undefined" &&
+    /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
+  );
+}
+
 export function getPreferredBackend(): Backend {
   if (typeof navigator === "undefined") return "wasm";
 
-  const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(
-    navigator.userAgent,
-  );
-  if (!isMobile && "gpu" in navigator) {
+  if (!isMobileDevice() && "gpu" in navigator) {
     return "webgpu";
   }
   return "wasm";
@@ -118,6 +130,7 @@ export async function createDetector(
 
   return runtime.pipeline("object-detection", MODELS[modelKey].id, {
     device: backend,
+    dtype: backend === "wasm" ? "q8" : "fp32",
     progress_callback: onProgress,
   });
 }

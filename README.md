@@ -7,9 +7,10 @@ or rear camera on a phone.
 ## What it includes
 
 - D-FINE-S accuracy mode (onnx-community/dfine_s_coco-ONNX)
-- D-FINE-N mobile-speed mode (onnx-community/dfine_n_coco-ONNX)
+- D-FINE-N faster desktop mode (onnx-community/dfine_n_coco-ONNX)
+- RT-DETRv2-R18 quantized mobile fallback (onnx-community/rtdetr_v2_r18vd-ONNX)
 - WebGPU acceleration on compatible desktops
-- Mobile-safe WebAssembly mode plus automatic fallback for unsupported WebGPU operations
+- Mobile-safe WebAssembly mode plus automatic model fallback for unsupported D-FINE operations
 - Human and CCTV vehicle filtering
 - Fast full-frame inference
 - Five-pass precision scanning: one full frame plus four overlapping tiles
@@ -50,16 +51,18 @@ Browsers permit camera access on HTTPS pages or localhost. On a phone, choose
 **Rear camera** for the outward-facing lens. On a laptop, choose
 **Front/webcam**.
 
-Android and iOS use the WebAssembly backend because current mobile WebGPU
-engines cannot execute every operation in the D-FINE ONNX graph. This changes
-speed, not the selected model or its detection accuracy.
+Android and iOS automatically use quantized RT-DETRv2-R18 on WebAssembly. Some
+browser runtimes cannot execute the `ceil()` shape calculation in D-FINE's
+MaxPool graph, so changing only the execution backend is insufficient. The app
+now changes both the model and the backend, then retries the frame automatically.
 
 ## Accuracy notes
 
-D-FINE-S is the recommended accuracy test. D-FINE-N is smaller and usually a
-better fit for phones. Precision scanning can expose small targets because each
-crop is enlarged for inference, but it performs five model passes and is
-therefore slower.
+D-FINE-S is the recommended desktop accuracy test. D-FINE-N is its smaller,
+faster alternative. RT-DETRv2-R18 is the compatible mobile path and is loaded
+in quantized form to reduce download and memory pressure. Precision scanning
+can expose small targets because each crop is enlarged for inference, but it
+performs five model passes and is therefore slower.
 
 The included weights are pretrained on COCO and the interface keeps only
 person, bicycle, car, motorcycle, bus, and truck. Filtering the output classes
@@ -74,7 +77,7 @@ precision, recall, and mAP.
 ## Project structure
 
 - app/page.tsx — media, camera, analysis loop, overlay, and interface
-- app/detection.ts — D-FINE loading, tiled inference, class filtering, and merge logic
+- app/detection.ts — model loading, mobile fallback, tiled inference, class filtering, and merge logic
 - app/globals.css — global theme
 
 The browser runtime is loaded from the pinned

@@ -4,7 +4,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "D-FINE Tiny-Target Accuracy Lab",
   description:
-    "Test D-FINE human and vehicle detection on images, video, mobile cameras and webcams with an optional precision tile scan.",
+    "Test D-FINE and RT-DETRv2 human and vehicle detection on images, video, mobile cameras and webcams with an optional precision tile scan.",
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",
