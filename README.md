@@ -8,6 +8,7 @@ or rear camera on a phone.
 
 - D-FINE-S accuracy mode (onnx-community/dfine_s_coco-ONNX)
 - D-FINE-N faster desktop mode (onnx-community/dfine_n_coco-ONNX)
+- RF-DETR-Nano experimental real-time transformer benchmark (onnx-community/rfdetr_nano-ONNX)
 - RT-DETRv2-R18 quantized mobile fallback (onnx-community/rtdetr_v2_r18vd-ONNX)
 - WebGPU acceleration on compatible desktops
 - Mobile-safe WebAssembly mode plus automatic model fallback for unsupported D-FINE operations
@@ -21,6 +22,17 @@ or rear camera on a phone.
 
 The media and inference stay in the browser. The model files are downloaded
 from Hugging Face the first time a model is used.
+
+## Model benchmark experiment
+
+RF-DETR-Nano is included as an experimental desktop/WebGPU comparison model. It
+uses the same source frame, confidence threshold, class filtering, precision
+tiles, duplicate merge, and timing display as D-FINE, so the models can be
+compared on the same CCTV frames without changing the surrounding pipeline.
+
+The experiment does not assume that general COCO AP predicts CCTV tiny-target
+performance. Compare full-frame recall, precision-tile gain, false detections,
+and inference time on the same distant-person and distant-vehicle scenes.
 
 ## Run locally
 
@@ -58,21 +70,26 @@ now changes both the model and the backend, then retries the frame automatically
 
 ## Accuracy notes
 
-D-FINE-S is the recommended desktop accuracy test. D-FINE-N is its smaller,
-faster alternative. RT-DETRv2-R18 is the compatible mobile path and is loaded
-in quantized form to reduce download and memory pressure. Precision scanning
-can expose small targets because each crop is enlarged for inference, but it
-performs five model passes and is therefore slower.
+D-FINE-S remains the reference desktop accuracy test. D-FINE-N is its smaller,
+faster alternative. RF-DETR-Nano is an experimental transformer challenger for
+measuring whether similar headline COCO accuracy translates into better browser
+latency or tiny-target recall. RT-DETRv2-R18 remains the compatible mobile path
+and is loaded in quantized form to reduce download and memory pressure.
+
+Precision scanning can expose small targets because each crop is enlarged for
+inference, but it performs five model passes and is therefore slower. A future
+live-CCTV mode should reduce this cost by refreshing precision regions over time
+instead of running all four tiles on every analysed frame.
 
 The included weights are pretrained on COCO and the interface keeps only
 person, bicycle, car, motorcycle, bus, and truck. Filtering the output classes
-does not reduce the neural network's compute; a genuinely two-class optimized
-model requires fine-tuning or distillation on a human/vehicle CCTV dataset and
+does not reduce the neural network's compute; a genuinely CCTV-optimized model
+requires fine-tuning or distillation on human/vehicle surveillance data and
 exporting those weights.
 
 The displayed count agreement is a convenient frame check, not formal model
 accuracy. A proper benchmark needs annotated bounding boxes and evaluation with
-precision, recall, and mAP.
+precision, recall, AP-small, and mAP.
 
 ## Project structure
 
