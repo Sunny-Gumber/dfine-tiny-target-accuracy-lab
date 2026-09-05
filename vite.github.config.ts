@@ -12,6 +12,7 @@ export default defineConfig({
       input: {
         main: fileURLToPath(new URL("./index.html", import.meta.url)),
         live: fileURLToPath(new URL("./live.html", import.meta.url)),
+        smart: fileURLToPath(new URL("./smart.html", import.meta.url)),
       },
     },
   },
