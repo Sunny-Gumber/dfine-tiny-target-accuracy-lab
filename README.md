@@ -34,6 +34,16 @@ Open the local address shown in the terminal.
 
     npm run build
 
+## GitHub Pages
+
+The repository includes an automatic GitHub Pages workflow. After GitHub Pages
+is set to **GitHub Actions** in the repository settings, every push to `main`
+builds and publishes the browser-only website.
+
+    npm run build:github
+
+Project site: https://sunny-gumber.github.io/dfine-tiny-target-accuracy-lab/
+
 ## Camera requirements
 
 Browsers permit camera access on HTTPS pages or localhost. On a phone, choose
