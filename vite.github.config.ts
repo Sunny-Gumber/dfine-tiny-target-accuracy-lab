@@ -15,6 +15,7 @@ export default defineConfig({
         smart: fileURLToPath(new URL("./smart.html", import.meta.url)),
         shootout: fileURLToPath(new URL("./shootout.html", import.meta.url)),
         video: fileURLToPath(new URL("./video.html", import.meta.url)),
+        benchmark: fileURLToPath(new URL("./benchmark.html", import.meta.url)),
       },
     },
   },
