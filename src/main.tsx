@@ -1,11 +1,13 @@
+import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import FastDemoPage from "../app/fast-demo-page";
-import "../app/globals.css";
+import App from "./App";
+import "./styles.css";
 
 const root = document.getElementById("root");
+if (!root) throw new Error("Root element not found");
 
-if (!root) {
-  throw new Error("Application root was not found.");
-}
-
-createRoot(root).render(<FastDemoPage />);
+createRoot(root).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+);
