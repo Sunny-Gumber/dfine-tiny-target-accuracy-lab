@@ -2,7 +2,8 @@ import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "
 
 type FacingMode = "environment" | "user";
 type SourceMode = "camera" | "image";
-type TargetKind = "Human" | "Vehicle";
+type DisplayMode = "focus" | "all";
+type DetectionGroup = "Human" | "Vehicle" | "Other";
 
 type RuntimeDetection = {
   classId: number;
@@ -43,7 +44,8 @@ type Detection = {
   x2: number;
   y2: number;
   confidence: number;
-  kind: TargetKind;
+  label: string;
+  group: DetectionGroup;
 };
 
 const RUNTIME_URL = "https://esm.sh/libreyolo-web@0.0.6?bundle&deps=onnxruntime-web@1.24.3";
@@ -55,10 +57,37 @@ const CAMERA_WARMUP_RUNS = 3;
 const LOOP_GAP_MS = 16;
 const ROAD_VEHICLE_CLASSES = new Set([1, 2, 3, 5, 7]);
 
-function targetKind(classId: number): TargetKind | null {
-  if (classId === 0) return "Human";
-  if (ROAD_VEHICLE_CLASSES.has(classId)) return "Vehicle";
-  return null;
+const COCO_LABELS = [
+  "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
+  "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog",
+  "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
+  "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite",
+  "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle",
+  "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich",
+  "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+  "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote",
+  "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book",
+  "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
+] as const;
+
+function titleCase(value: string) {
+  return value.replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function mapDetection(classId: number, mode: DisplayMode): { label: string; group: DetectionGroup } | null {
+  if (classId === 0) return { label: "Human", group: "Human" };
+
+  if (mode === "focus") {
+    if (ROAD_VEHICLE_CLASSES.has(classId)) return { label: "Vehicle", group: "Vehicle" };
+    return null;
+  }
+
+  const className = COCO_LABELS[classId];
+  if (!className) return null;
+  return {
+    label: titleCase(className),
+    group: ROAD_VEHICLE_CLASSES.has(classId) ? "Vehicle" : "Other",
+  };
 }
 
 function formatMs(value: number) {
@@ -78,6 +107,7 @@ function Metric({ label, value, note }: { label: string; value: string | number;
 
 export default function App() {
   const [sourceMode, setSourceMode] = useState<SourceMode>("camera");
+  const [displayMode, setDisplayMode] = useState<DisplayMode>("focus");
   const [threshold, setThreshold] = useState(0.3);
   const [running, setRunning] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
@@ -108,10 +138,13 @@ export default function App() {
   const warmupRef = useRef(CAMERA_WARMUP_RUNS);
 
   const humans = useMemo(
-    () => detections.filter((item) => item.kind === "Human").length,
+    () => detections.filter((item) => item.group === "Human").length,
     [detections],
   );
-  const vehicles = detections.length - humans;
+  const vehicles = useMemo(
+    () => detections.filter((item) => item.group === "Vehicle").length,
+    [detections],
+  );
   const effectiveFps = averageMs ? 1000 / averageMs : 0;
 
   const clearOverlay = useCallback(() => {
@@ -218,12 +251,12 @@ export default function App() {
     context.textBaseline = "top";
 
     for (const item of items) {
-      const color = item.kind === "Human" ? "#58e2d3" : "#f4cf52";
+      const color = item.group === "Human" ? "#58e2d3" : item.group === "Vehicle" ? "#f4cf52" : "#79bdf2";
       const x = Math.max(0, item.x1);
       const y = Math.max(0, item.y1);
       const boxWidth = Math.max(1, item.x2 - item.x1);
       const boxHeight = Math.max(1, item.y2 - item.y1);
-      const label = `${item.kind} ${Math.round(item.confidence * 100)}%`;
+      const label = `${item.label} ${Math.round(item.confidence * 100)}%`;
       const labelHeight = Math.max(19, width / 60);
       const labelWidth = context.measureText(label).width + 10;
 
@@ -259,15 +292,17 @@ export default function App() {
 
         const items = result.detections
           .map((item): Detection | null => {
-            const kind = targetKind(item.classId);
-            if (!kind || item.confidence < threshold) return null;
+            if (item.confidence < threshold) return null;
+            const mapped = mapDetection(item.classId, displayMode);
+            if (!mapped) return null;
             return {
               x1: item.bbox[0],
               y1: item.bbox[1],
               x2: item.bbox[2],
               y2: item.bbox[3],
               confidence: item.confidence,
-              kind,
+              label: mapped.label,
+              group: mapped.group,
             };
           })
           .filter((item): item is Detection => item !== null);
@@ -301,7 +336,7 @@ export default function App() {
         busyRef.current = false;
       }
     },
-    [drawDetections, ensureModel, threshold],
+    [displayMode, drawDetections, ensureModel, threshold],
   );
 
   useEffect(() => {
@@ -390,19 +425,27 @@ export default function App() {
     await analyseSource(imageRef.current, false);
   }, [analyseSource, imageUrl, resetStats]);
 
+  const changeDisplayMode = useCallback(
+    (mode: DisplayMode) => {
+      setDisplayMode(mode);
+      resetStats(0);
+    },
+    [resetStats],
+  );
+
   return (
     <main className="page-shell">
       <header className="hero">
         <p className="eyebrow">Browser computer vision demo</p>
         <h1>Human + Vehicle Detection</h1>
         <p className="intro">
-          A lightweight YOLOX Nano demo that runs directly in the browser. Use a phone camera,
-          webcam or an uploaded image without sending the media to an application server.
+          A lightweight YOLOX Nano demo that runs directly in the browser. Human + Vehicle is the
+          default view; All COCO objects can be enabled to compare browser load using the same model.
         </p>
         <div className="badges">
           <span>YOLOX Nano · {MODEL_INPUT}px</span>
           <span>{provider.toUpperCase()}</span>
-          <span>Human + Vehicle</span>
+          <span>{displayMode === "focus" ? "Human + Vehicle" : "All COCO · 80 classes"}</span>
         </div>
       </header>
 
@@ -491,6 +534,30 @@ export default function App() {
         <div className="section-title">
           <span>2</span>
           <div>
+            <h2>Detection set</h2>
+            <p>The model is unchanged. This only controls which YOLOX predictions are displayed.</p>
+          </div>
+        </div>
+        <div className="source-grid">
+          <button
+            className={displayMode === "focus" ? "primary" : undefined}
+            onClick={() => changeDisplayMode("focus")}
+          >
+            Human + Vehicle
+          </button>
+          <button
+            className={displayMode === "all" ? "primary" : undefined}
+            onClick={() => changeDisplayMode("all")}
+          >
+            All COCO objects (80)
+          </button>
+        </div>
+      </section>
+
+      <section className="panel controls">
+        <div className="section-title">
+          <span>3</span>
+          <div>
             <h2>Detection confidence</h2>
             <p>Lower values find more candidates but can also increase false detections.</p>
           </div>
@@ -516,8 +583,8 @@ export default function App() {
           <p>YOLOX Nano runs one inference pass at its native 416 × 416 input.</p>
         </div>
         <div>
-          <strong>Simple labels</strong>
-          <p>COCO road-vehicle classes are grouped into a single Vehicle label.</p>
+          <strong>Two display modes</strong>
+          <p>Compare the focused Human + Vehicle view with all 80 COCO classes using the same inference.</p>
         </div>
         <div>
           <strong>Local media</strong>
