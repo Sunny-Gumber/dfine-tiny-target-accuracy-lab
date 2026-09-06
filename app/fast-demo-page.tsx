@@ -2,7 +2,6 @@
 
 import {
   Camera,
-  CarFront,
   Cpu,
   Gauge,
   Image as ImageIcon,
@@ -12,7 +11,6 @@ import {
   RefreshCw,
   Smartphone,
   Upload,
-  UserRound,
   Zap,
 } from "lucide-react";
 import {
@@ -77,10 +75,13 @@ type Detection = {
 const LIBRE_RUNTIME_URL =
   "https://esm.sh/libreyolo-web@0.0.6?bundle&deps=onnxruntime-web@1.24.3";
 const MODEL_SOURCE = "LibreYOLOXn";
-const MODEL_INPUT = 416;
-const MIN_LOOP_GAP_MS = 55;
+const LIVE_INPUT = 320;
+const IMAGE_INPUT = 416;
+const CAMERA_WIDTH = 1280;
+const CAMERA_HEIGHT = 720;
+const MIN_LOOP_GAP_MS = 45;
+const CAMERA_WARMUP_RUNS = 3;
 
-// Public demo intentionally exposes only four target types.
 function classToKind(classId: number): TargetKind | null {
   if (classId === 0) return "Human";
   if (classId === 2) return "Car";
@@ -112,10 +113,12 @@ export default function FastDemoPage() {
   const [modelState, setModelState] = useState<"loading" | "ready" | "error">("loading");
   const [modelProgress, setModelProgress] = useState(0);
   const [provider, setProvider] = useState("waiting");
+  const [activeInput, setActiveInput] = useState(LIVE_INPUT);
   const [detections, setDetections] = useState<Detection[]>([]);
   const [frameMs, setFrameMs] = useState(0);
   const [avgMs, setAvgMs] = useState(0);
   const [frames, setFrames] = useState(0);
+  const [warmupRemaining, setWarmupRemaining] = useState(CAMERA_WARMUP_RUNS);
   const [error, setError] = useState("");
   const [imageUrl, setImageUrl] = useState("");
   const [sourceName, setSourceName] = useState("Rear camera ready");
@@ -124,12 +127,18 @@ export default function FastDemoPage() {
   const imageRef = useRef<HTMLImageElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const modelRef = useRef<LibreModel | null>(null);
+  const modelInputRef = useRef(0);
+  const runtimeRef = useRef<LibreRuntime | null>(null);
+  const modelPromiseRef = useRef<Promise<LibreModel> | null>(null);
+  const promiseInputRef = useRef(0);
+  const loadIdRef = useRef(0);
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const objectUrlRef = useRef("");
   const busyRef = useRef(false);
   const loopRef = useRef<number | null>(null);
   const lastStartRef = useRef(0);
   const timingRef = useRef<number[]>([]);
+  const warmupRef = useRef(CAMERA_WARMUP_RUNS);
 
   const humanCount = useMemo(
     () => detections.filter((d) => d.kind === "Human").length,
@@ -153,48 +162,98 @@ export default function FastDemoPage() {
     ctx?.clearRect(0, 0, canvas.width, canvas.height);
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      setModelState("loading");
-      setModelProgress(2);
-      setError("");
-      try {
+  const resetStats = useCallback((warmups = 0) => {
+    timingRef.current = [];
+    warmupRef.current = warmups;
+    setWarmupRemaining(warmups);
+    setFrameMs(0);
+    setAvgMs(0);
+    setFrames(0);
+    setDetections([]);
+    clearOverlay();
+  }, [clearOverlay]);
+
+  const ensureModel = useCallback(async (inputSize: number): Promise<LibreModel> => {
+    if (modelRef.current && modelInputRef.current === inputSize) return modelRef.current;
+    if (modelPromiseRef.current && promiseInputRef.current === inputSize) return modelPromiseRef.current;
+
+    const loadId = ++loadIdRef.current;
+    setModelState("loading");
+    setModelProgress(2);
+    setError("");
+    promiseInputRef.current = inputSize;
+
+    const promise = (async () => {
+      if (!runtimeRef.current) {
         const moduleUrl: string = LIBRE_RUNTIME_URL;
-        const runtime = (await import(/* @vite-ignore */ moduleUrl)) as unknown as LibreRuntime;
-        if (cancelled) return;
-        const model = await runtime.loadModel(MODEL_SOURCE, {
-          device: ["webgpu", "wasm"],
-          inputSize: MODEL_INPUT,
-          modelFamily: "yolox",
-          confThres: 0.12,
-          iouThres: 0.65,
-          maxDet: 120,
-          onProgress: (progress) => {
-            if (!cancelled) setModelProgress(Math.max(2, Math.min(99, Math.round(progress * 100))));
-          },
-        });
-        if (cancelled) {
-          await model.release();
-          return;
+        runtimeRef.current = (await import(/* @vite-ignore */ moduleUrl)) as unknown as LibreRuntime;
+      }
+
+      const previous = modelRef.current;
+      modelRef.current = null;
+      modelInputRef.current = 0;
+      if (previous) {
+        try {
+          await previous.release();
+        } catch {
+          // A previous session may already be closed.
         }
-        modelRef.current = model;
-        setProvider(model.provider || "wasm");
-        setModelProgress(100);
-        setModelState("ready");
-      } catch (caught) {
+      }
+
+      const model = await runtimeRef.current.loadModel(MODEL_SOURCE, {
+        device: ["webgpu", "wasm"],
+        inputSize,
+        modelFamily: "yolox",
+        confThres: 0.12,
+        iouThres: 0.65,
+        maxDet: 120,
+        onProgress: (progress) => {
+          if (loadId === loadIdRef.current) {
+            setModelProgress(Math.max(2, Math.min(99, Math.round(progress * 100))));
+          }
+        },
+      });
+
+      if (loadId !== loadIdRef.current) {
+        await model.release();
+        throw new Error("Model load was superseded by a newer source mode.");
+      }
+
+      modelRef.current = model;
+      modelInputRef.current = inputSize;
+      setActiveInput(inputSize);
+      setProvider(model.provider || "wasm");
+      setModelProgress(100);
+      setModelState("ready");
+      return model;
+    })();
+
+    modelPromiseRef.current = promise;
+    try {
+      return await promise;
+    } catch (caught) {
+      if (loadId === loadIdRef.current) {
         setModelState("error");
         setError(caught instanceof Error ? caught.message : "YOLOX Nano could not load.");
       }
-    };
-    void load();
-    return () => {
-      cancelled = true;
-    };
+      throw caught;
+    } finally {
+      if (loadId === loadIdRef.current) {
+        modelPromiseRef.current = null;
+        promiseInputRef.current = 0;
+      }
+    }
   }, []);
 
   useEffect(() => {
+    void ensureModel(LIVE_INPUT).catch(() => {
+      // Error state is shown in the UI.
+    });
+  }, [ensureModel]);
+
+  useEffect(() => {
     return () => {
+      loadIdRef.current += 1;
       if (loopRef.current !== null) cancelAnimationFrame(loopRef.current);
       cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
       if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
@@ -238,7 +297,8 @@ export default function FastDemoPage() {
   }, []);
 
   const analyseOnce = useCallback(async () => {
-    if (busyRef.current || !modelRef.current) return;
+    if (busyRef.current) return;
+    const desiredInput = sourceMode === "camera" ? LIVE_INPUT : IMAGE_INPUT;
     const source = sourceMode === "camera" ? videoRef.current : imageRef.current;
     if (!source) return;
     const width = source instanceof HTMLVideoElement ? source.videoWidth : source.naturalWidth;
@@ -246,13 +306,16 @@ export default function FastDemoPage() {
     if (!width || !height) return;
 
     busyRef.current = true;
-    const started = performance.now();
     try {
-      const result = await modelRef.current.predict(source, {
+      const model = await ensureModel(desiredInput);
+      const started = performance.now();
+      const result = await model.predict(source, {
         confThres: Math.max(0.08, threshold),
         iouThres: 0.65,
         maxDet: 120,
       });
+      const elapsed = performance.now() - started;
+
       const next = result.detections
         .map((item): Detection | null => {
           const kind = classToKind(item.classId);
@@ -269,22 +332,28 @@ export default function FastDemoPage() {
         })
         .filter((item): item is Detection => item !== null);
 
-      const elapsed = performance.now() - started;
+      setDetections(next);
+      setProvider(model.provider || "wasm");
+      drawDetections(next, width, height);
+
+      if (sourceMode === "camera" && warmupRef.current > 0) {
+        warmupRef.current -= 1;
+        setWarmupRemaining(warmupRef.current);
+        return;
+      }
+
       timingRef.current = [...timingRef.current.slice(-29), elapsed];
       const average = timingRef.current.reduce((sum, value) => sum + value, 0) / timingRef.current.length;
-      setDetections(next);
       setFrameMs(elapsed);
       setAvgMs(average);
       setFrames((value) => value + 1);
-      setProvider(modelRef.current.provider || "wasm");
-      drawDetections(next, width, height);
     } catch (caught) {
       setRunning(false);
       setError(caught instanceof Error ? caught.message : "Live inference failed.");
     } finally {
       busyRef.current = false;
     }
-  }, [drawDetections, sourceMode, threshold]);
+  }, [drawDetections, ensureModel, sourceMode, threshold]);
 
   useEffect(() => {
     if (!running || sourceMode !== "camera") return;
@@ -305,18 +374,9 @@ export default function FastDemoPage() {
     };
   }, [analyseOnce, running, sourceMode]);
 
-  const resetStats = useCallback(() => {
-    timingRef.current = [];
-    setFrameMs(0);
-    setAvgMs(0);
-    setFrames(0);
-    setDetections([]);
-    clearOverlay();
-  }, [clearOverlay]);
-
   const startCamera = useCallback(async (facing: FacingMode) => {
     stopCamera();
-    resetStats();
+    resetStats(CAMERA_WARMUP_RUNS);
     setSourceMode("camera");
     setError("");
     setSourceName(facing === "environment" ? "Rear camera" : "Front camera / webcam");
@@ -324,12 +384,15 @@ export default function FastDemoPage() {
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error("Camera access requires HTTPS and a supported browser.");
       }
+
+      await ensureModel(LIVE_INPUT);
+
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
         video: {
           facingMode: { ideal: facing },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
+          width: { ideal: CAMERA_WIDTH },
+          height: { ideal: CAMERA_HEIGHT },
           frameRate: { ideal: 30, max: 30 },
         },
       });
@@ -344,13 +407,13 @@ export default function FastDemoPage() {
       stopCamera();
       setError(caught instanceof Error ? caught.message : "Camera permission was not granted.");
     }
-  }, [resetStats, stopCamera]);
+  }, [ensureModel, resetStats, stopCamera]);
 
   const handleImage = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
     stopCamera();
-    resetStats();
+    resetStats(0);
     if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
     const url = URL.createObjectURL(file);
     objectUrlRef.current = url;
@@ -359,6 +422,19 @@ export default function FastDemoPage() {
     setSourceName(file.name);
     event.target.value = "";
   }, [resetStats, stopCamera]);
+
+  const analyseLoadedImage = useCallback(async () => {
+    try {
+      await ensureModel(IMAGE_INPUT);
+      await analyseOnce();
+    } catch {
+      // Error state is already surfaced by ensureModel/analyseOnce.
+    }
+  }, [analyseOnce, ensureModel]);
+
+  const modelBadge = sourceMode === "camera"
+    ? `YOLOX Nano · ${LIVE_INPUT} live`
+    : `YOLOX Nano · ${IMAGE_INPUT} image`;
 
   return (
     <main className="min-h-screen bg-[#021018] text-slate-100">
@@ -371,11 +447,11 @@ export default function FastDemoPage() {
               </div>
               <h1 className="mt-2 text-3xl font-bold tracking-tight sm:text-4xl">Real-Time Human + Vehicle Detection</h1>
               <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
-                A focused CCTV-style browser demo using one lightweight detector only: YOLOX Nano. No multi-model switching and no 5-pass tiling in the live path.
+                One lightweight YOLOX Nano detector. Live camera uses a speed-focused 320 input; image analysis automatically uses 416 for more detail.
               </p>
             </div>
             <div className="flex flex-wrap gap-2 text-xs">
-              <span className="rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 py-2 text-cyan-100">YOLOX Nano · 416</span>
+              <span className="rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 py-2 text-cyan-100">{modelBadge}</span>
               <span className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-slate-300">{provider.toUpperCase()}</span>
               <span className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-slate-300">Human + 3 vehicle types</span>
             </div>
@@ -392,7 +468,17 @@ export default function FastDemoPage() {
             </div>
             <div className="flex items-center gap-2 text-xs">
               <span className={`h-2 w-2 rounded-full ${running ? "bg-emerald-400 animate-pulse" : "bg-slate-600"}`} />
-              <span className="text-slate-300">{running ? "Analysing" : sourceMode === "image" ? "Image ready" : cameraActive ? "Paused" : "Waiting"}</span>
+              <span className="text-slate-300">
+                {running
+                  ? warmupRemaining > 0
+                    ? `Warming up · ${warmupRemaining}`
+                    : "Analysing"
+                  : sourceMode === "image"
+                    ? "Image ready"
+                    : cameraActive
+                      ? "Paused"
+                      : "Waiting"}
+              </span>
             </div>
           </div>
 
@@ -405,7 +491,7 @@ export default function FastDemoPage() {
                 src={imageUrl}
                 alt="Detection source"
                 className="h-full w-full object-contain"
-                onLoad={() => void analyseOnce()}
+                onLoad={() => void analyseLoadedImage()}
               />
             ) : (
               <div className="flex h-full items-center justify-center text-center text-sm text-slate-500">
@@ -420,7 +506,11 @@ export default function FastDemoPage() {
             <Stat label="Humans" value={humanCount} />
             <Stat label="Vehicles" value={vehicleCount} />
             <Stat label="Current" value={formatMs(frameMs)} />
-            <Stat label="Average" value={formatMs(avgMs)} note={`${frames} analysed`} />
+            <Stat
+              label="Stable avg"
+              value={formatMs(avgMs)}
+              note={sourceMode === "camera" ? `${frames} timed · warm-up excluded` : `${frames} analysed`}
+            />
             <Stat label="Effective" value={fps ? fps.toFixed(1) + " FPS" : "—"} />
           </div>
         </section>
@@ -450,7 +540,7 @@ export default function FastDemoPage() {
                 </button>
               </div>
             ) : sourceMode === "image" && imageUrl ? (
-              <button onClick={() => void analyseOnce()} className="mt-3 flex min-h-12 w-full items-center justify-center gap-2 rounded-xl border border-cyan-300/25 bg-cyan-300/10 text-sm font-semibold text-cyan-100">
+              <button onClick={() => void analyseLoadedImage()} className="mt-3 flex min-h-12 w-full items-center justify-center gap-2 rounded-xl border border-cyan-300/25 bg-cyan-300/10 text-sm font-semibold text-cyan-100">
                 <Play size={17} /> Analyse image
               </button>
             ) : null}
@@ -479,11 +569,13 @@ export default function FastDemoPage() {
             <div className="flex items-center gap-2 text-sm font-semibold"><Cpu size={18} className="text-cyan-300" /> Runtime status</div>
             {modelState === "loading" ? (
               <div className="mt-4">
-                <div className="flex items-center gap-2 text-sm text-slate-300"><LoaderCircle className="animate-spin" size={17} /> Loading YOLOX Nano… {modelProgress}%</div>
+                <div className="flex items-center gap-2 text-sm text-slate-300"><LoaderCircle className="animate-spin" size={17} /> Loading YOLOX Nano {activeInput}px… {modelProgress}%</div>
                 <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/10"><div className="h-full bg-cyan-300 transition-all" style={{ width: `${modelProgress}%` }} /></div>
               </div>
             ) : modelState === "ready" ? (
-              <div className="mt-4 rounded-xl border border-emerald-400/15 bg-emerald-400/5 p-3 text-xs leading-5 text-emerald-100">Model ready. The live path uses one YOLOX Nano inference per analysed frame.</div>
+              <div className="mt-4 rounded-xl border border-emerald-400/15 bg-emerald-400/5 p-3 text-xs leading-5 text-emerald-100">
+                YOLOX Nano ready at {activeInput}px. {sourceMode === "camera" ? "The first 3 live passes are excluded from timing." : "Image mode uses the higher-detail 416 input."}
+              </div>
             ) : (
               <div className="mt-4 rounded-xl border border-red-400/20 bg-red-400/5 p-3 text-xs leading-5 text-red-200">Model failed to load.</div>
             )}
@@ -495,7 +587,7 @@ export default function FastDemoPage() {
       <section className="mx-auto max-w-[1450px] px-4 pb-10 sm:px-8">
         <div className="grid gap-4 rounded-[28px] border border-white/10 bg-[#061b24] p-6 md:grid-cols-3">
           <div><div className="text-xs font-bold uppercase tracking-[.2em] text-cyan-300">Focused</div><p className="mt-2 text-sm leading-6 text-slate-400">Only four public target types are displayed: Human, Car, Motorcycle and Bus/Truck.</p></div>
-          <div><div className="text-xs font-bold uppercase tracking-[.2em] text-cyan-300">Fast</div><p className="mt-2 text-sm leading-6 text-slate-400">YOLOX Nano was the fastest practical model in our browser tests, so the public demo uses it exclusively.</p></div>
+          <div><div className="text-xs font-bold uppercase tracking-[.2em] text-cyan-300">Fast live path</div><p className="mt-2 text-sm leading-6 text-slate-400">Camera and webcam use YOLOX Nano at 320 with a 1280×720 capture request and one inference pass per analysed frame.</p></div>
           <div><div className="text-xs font-bold uppercase tracking-[.2em] text-cyan-300">Private</div><p className="mt-2 text-sm leading-6 text-slate-400">Camera and image inference runs locally in the browser. Media is not uploaded by this page.</p></div>
         </div>
       </section>
