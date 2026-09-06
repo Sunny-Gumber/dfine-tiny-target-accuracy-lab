@@ -1,102 +1,43 @@
-# D-FINE Tiny-Target Accuracy Lab
+# Browser Human + Vehicle Detection
 
-A browser-based human and vehicle detector for testing distant or low-pixel
-CCTV targets. It accepts images, uploaded videos, desktop webcams, and the front
-or rear camera on a phone.
+A small browser demo for detecting people and road vehicles from a webcam, mobile camera, or uploaded image.
 
-## What it includes
+**Live demo:** https://sunny-gumber.github.io/dfine-tiny-target-accuracy-lab/
 
-- D-FINE-S accuracy mode (onnx-community/dfine_s_coco-ONNX)
-- D-FINE-N faster desktop mode (onnx-community/dfine_n_coco-ONNX)
-- RF-DETR-Nano experimental real-time transformer benchmark (onnx-community/rfdetr_nano-ONNX)
-- RT-DETRv2-R18 quantized mobile fallback (onnx-community/rtdetr_v2_r18vd-ONNX)
-- WebGPU acceleration on compatible desktops
-- Mobile-safe WebAssembly mode plus automatic model fallback for unsupported D-FINE operations
-- Human and CCTV vehicle filtering
-- Fast full-frame inference
-- Five-pass precision scanning: one full frame plus four overlapping tiles
-- Cross-tile duplicate merging
-- Live boxes, confidence, pixel coordinates, class counts, and inference time
-- Manual ground-truth counts for a quick per-frame count-agreement check
-- Image, video, front camera/webcam, and mobile rear-camera input
+## What it does
 
-The media and inference stay in the browser. The model files are downloaded
-from Hugging Face the first time a model is used.
+- Runs YOLOX Nano directly in the browser
+- Uses WebGPU when available, with WASM as a fallback
+- Supports rear camera, front camera/webcam, and image upload
+- Keeps the public output simple: **Human** and **Vehicle**
+- Shows live inference time and a rolling FPS estimate for camera input
+- Does not upload camera frames or images to an application server
 
-## Model benchmark experiment
+## Current setup
 
-RF-DETR-Nano is included as an experimental desktop/WebGPU comparison model. It
-uses the same source frame, confidence threshold, class filtering, precision
-tiles, duplicate merge, and timing display as D-FINE, so the models can be
-compared on the same CCTV frames without changing the surrounding pipeline.
+The model uses its native **416 × 416** input. For live use, the browser requests a **640 × 360** camera stream to keep capture and rendering overhead reasonable. Uploaded images are analysed as a complete frame and are resized by the model preprocessor.
 
-The experiment does not assume that general COCO AP predicts CCTV tiny-target
-performance. Compare full-frame recall, precision-tile gain, false detections,
-and inference time on the same distant-person and distant-vehicle scenes.
+The underlying COCO road-vehicle classes (bicycle, car, motorcycle, bus and truck) are grouped into one `Vehicle` label. This avoids presenting fine-grained vehicle classification as something the model was not tuned for in Indian traffic scenes.
 
 ## Run locally
 
-Requirements: Node.js 22.13 or newer.
+```bash
+npm install
+npm run dev
+```
 
-    npm ci
-    npm run dev
+Then open the local Vite URL in a browser. Camera access requires a secure context (`https://` or localhost).
 
-Open the local address shown in the terminal.
+## Build
 
-## Production build
+```bash
+npm run build
+```
 
-    npm run build
+GitHub Actions publishes the `dist` folder to GitHub Pages on pushes to `main`.
 
-## GitHub Pages
+## Notes
 
-The repository includes an automatic GitHub Pages workflow. After GitHub Pages
-is set to **GitHub Actions** in the repository settings, every push to `main`
-builds and publishes the browser-only website.
+This is an engineering demo, not a production surveillance system. Detection quality depends on target size, lighting, occlusion, camera angle, browser runtime and device performance. The displayed FPS is an inference-rate estimate based on measured model latency; it is not the camera capture frame rate.
 
-    npm run build:github
-
-Project site: https://sunny-gumber.github.io/dfine-tiny-target-accuracy-lab/
-
-## Camera requirements
-
-Browsers permit camera access on HTTPS pages or localhost. On a phone, choose
-**Rear camera** for the outward-facing lens. On a laptop, choose
-**Front/webcam**.
-
-Android and iOS automatically use quantized RT-DETRv2-R18 on WebAssembly. Some
-browser runtimes cannot execute the `ceil()` shape calculation in D-FINE's
-MaxPool graph, so changing only the execution backend is insufficient. The app
-now changes both the model and the backend, then retries the frame automatically.
-
-## Accuracy notes
-
-D-FINE-S remains the reference desktop accuracy test. D-FINE-N is its smaller,
-faster alternative. RF-DETR-Nano is an experimental transformer challenger for
-measuring whether similar headline COCO accuracy translates into better browser
-latency or tiny-target recall. RT-DETRv2-R18 remains the compatible mobile path
-and is loaded in quantized form to reduce download and memory pressure.
-
-Precision scanning can expose small targets because each crop is enlarged for
-inference, but it performs five model passes and is therefore slower. A future
-live-CCTV mode should reduce this cost by refreshing precision regions over time
-instead of running all four tiles on every analysed frame.
-
-The included weights are pretrained on COCO and the interface keeps only
-person, bicycle, car, motorcycle, bus, and truck. Filtering the output classes
-does not reduce the neural network's compute; a genuinely CCTV-optimized model
-requires fine-tuning or distillation on human/vehicle surveillance data and
-exporting those weights.
-
-The displayed count agreement is a convenient frame check, not formal model
-accuracy. A proper benchmark needs annotated bounding boxes and evaluation with
-precision, recall, AP-small, and mAP.
-
-## Project structure
-
-- app/page.tsx — media, camera, analysis loop, overlay, and interface
-- app/detection.ts — model loading, mobile fallback, tiled inference, class filtering, and merge logic
-- app/globals.css — global theme
-
-The browser runtime is loaded from the pinned
-@huggingface/transformers 3.8.1 CDN module, so no extra inference dependency is
-needed during the site build.
+The model/runtime is downloaded on first use, so the first load can take longer than later runs.
