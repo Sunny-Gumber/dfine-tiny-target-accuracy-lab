@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import App from "./App";
 import FaceLab from "./FaceLab";
 import "./styles.css";
+import "./face.css";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("Root element not found");
