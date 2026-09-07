@@ -1,7 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
-import FaceLab from "./FaceLab";
+import FaceLab from "./FaceLabBundled";
 import "./styles.css";
 import "./face.css";
 
