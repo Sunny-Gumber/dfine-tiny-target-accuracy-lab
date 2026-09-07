@@ -1,0 +1,162 @@
+.face-lab .hero {
+  position: relative;
+}
+
+.lab-link {
+  display: inline-block;
+  margin-top: 18px;
+  color: #7fe5ed;
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.lab-link:hover {
+  text-decoration: underline;
+}
+
+.face-camera-layer {
+  width: 100%;
+  margin: 0 auto;
+}
+
+.face-camera-layer .media {
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+}
+
+.face-metrics {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.face-results-panel {
+  overflow: hidden;
+}
+
+.crop-count {
+  color: #7fe5ed;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.face-crop-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 16px;
+  padding: 0 20px 20px;
+}
+
+.face-card {
+  overflow: hidden;
+  border: 1px solid #1a424c;
+  border-radius: 18px;
+  background: #061920;
+}
+
+.face-card > img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  background: #02090c;
+}
+
+.face-card-body {
+  padding: 16px;
+}
+
+.face-card-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.face-card-title strong {
+  font-size: 17px;
+}
+
+.face-card-title span {
+  padding: 5px 8px;
+  border: 1px solid #28515b;
+  border-radius: 999px;
+  color: #7fe5ed;
+  font-size: 12px;
+}
+
+.metadata-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.metadata-grid div {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #173640;
+  border-radius: 12px;
+  background: #09232b;
+}
+
+.metadata-grid dt {
+  color: #6f8991;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.metadata-grid dd {
+  margin: 5px 0 0;
+  color: #e9f6f7;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.crop-download {
+  display: grid;
+  min-height: 42px;
+  margin-top: 14px;
+  place-items: center;
+  border: 1px solid #28515b;
+  border-radius: 12px;
+  background: #0c2a32;
+  color: #bceff2;
+  font-size: 13px;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.crop-download:hover {
+  background: #12353e;
+}
+
+.face-empty {
+  min-height: 150px;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  color: #718990;
+  border-top: 1px solid #15353e;
+}
+
+@media (max-width: 720px) {
+  .face-metrics {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .face-crop-grid {
+    grid-template-columns: 1fr;
+    padding: 0 14px 14px;
+  }
+
+  .metadata-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .face-camera-layer .media {
+    max-height: none;
+  }
+}
