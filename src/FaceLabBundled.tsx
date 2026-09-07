@@ -33,11 +33,11 @@ type FaceCrop = {
 };
 
 const WASM_URLS = [
-  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm",
-  "https://unpkg.com/@mediapipe/tasks-vision@0.10.22/wasm",
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm",
+  "https://unpkg.com/@mediapipe/tasks-vision@1.0.1/wasm",
 ];
 const MODEL_URL =
-  "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/latest/blaze_face_short_range.tflite";
+  "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite";
 const CAMERA_WIDTH = 640;
 const CAMERA_HEIGHT = 480;
 const LIVE_INTERVAL_MS = 250;
