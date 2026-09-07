@@ -84,6 +84,7 @@ function mapDetection(classId: number, mode: DisplayMode): { label: string; grou
 
   const className = COCO_LABELS[classId];
   if (!className) return null;
+
   return {
     label: titleCase(className),
     group: ROAD_VEHICLE_CLASSES.has(classId) ? "Vehicle" : "Other",
@@ -108,6 +109,8 @@ function Metric({ label, value, note }: { label: string; value: string | number;
 export default function App() {
   const [sourceMode, setSourceMode] = useState<SourceMode>("camera");
   const [displayMode, setDisplayMode] = useState<DisplayMode>("focus");
+  const [selectedCamera, setSelectedCamera] = useState<FacingMode | null>(null);
+  const [cameraAspect, setCameraAspect] = useState("16 / 9");
   const [threshold, setThreshold] = useState(0.3);
   const [running, setRunning] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
@@ -145,6 +148,10 @@ export default function App() {
     () => detections.filter((item) => item.group === "Vehicle").length,
     [detections],
   );
+  const otherObjects = useMemo(
+    () => detections.filter((item) => item.group === "Other").length,
+    [detections],
+  );
   const effectiveFps = averageMs ? 1000 / averageMs : 0;
 
   const clearOverlay = useCallback(() => {
@@ -173,6 +180,12 @@ export default function App() {
     if (videoRef.current) videoRef.current.srcObject = null;
     setCameraActive(false);
     setRunning(false);
+  }, []);
+
+  const syncCameraAspect = useCallback(() => {
+    const video = videoRef.current;
+    if (!video?.videoWidth || !video.videoHeight) return;
+    setCameraAspect(`${video.videoWidth} / ${video.videoHeight}`);
   }, []);
 
   const ensureModel = useCallback(async () => {
@@ -259,15 +272,16 @@ export default function App() {
       const label = `${item.label} ${Math.round(item.confidence * 100)}%`;
       const labelHeight = Math.max(19, width / 60);
       const labelWidth = context.measureText(label).width + 10;
+      const labelY = Math.max(0, y - labelHeight);
 
       context.strokeStyle = color;
       context.fillStyle = `${color}12`;
       context.strokeRect(x, y, boxWidth, boxHeight);
       context.fillRect(x, y, boxWidth, boxHeight);
       context.fillStyle = color;
-      context.fillRect(x, Math.max(0, y - labelHeight), labelWidth, labelHeight);
+      context.fillRect(x, labelY, labelWidth, labelHeight);
       context.fillStyle = "#04151b";
-      context.fillText(label, x + 5, Math.max(1, y - labelHeight + 3));
+      context.fillText(label, x + 5, labelY + 3);
     }
   }, []);
 
@@ -295,6 +309,7 @@ export default function App() {
             if (item.confidence < threshold) return null;
             const mapped = mapDetection(item.classId, displayMode);
             if (!mapped) return null;
+
             return {
               x1: item.bbox[0],
               y1: item.bbox[1],
@@ -360,12 +375,42 @@ export default function App() {
     };
   }, [analyseSource, running, sourceMode]);
 
+  const requestCameraStream = useCallback(async (facingMode: FacingMode) => {
+    const constraints: MediaStreamConstraints = {
+      audio: false,
+      video: {
+        facingMode: { ideal: facingMode },
+        width: { ideal: CAMERA_WIDTH },
+        height: { ideal: CAMERA_HEIGHT },
+        frameRate: { ideal: 30, max: 30 },
+      },
+    };
+
+    try {
+      return await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (firstError) {
+      try {
+        return await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            width: { ideal: CAMERA_WIDTH },
+            height: { ideal: CAMERA_HEIGHT },
+            frameRate: { ideal: 30, max: 30 },
+          },
+        });
+      } catch {
+        throw firstError;
+      }
+    }
+  }, []);
+
   const startCamera = useCallback(
     async (facingMode: FacingMode) => {
       stopCamera();
       resetStats(CAMERA_WARMUP_RUNS);
       setSourceMode("camera");
-      setSourceName(facingMode === "environment" ? "Rear camera" : "Front camera / webcam");
+      setSelectedCamera(facingMode);
+      setSourceName(facingMode === "environment" ? "Back camera" : "Front camera / Webcam");
       setError("");
 
       try {
@@ -374,29 +419,33 @@ export default function App() {
         }
 
         await ensureModel();
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: {
-            facingMode: { ideal: facingMode },
-            width: { ideal: CAMERA_WIDTH },
-            height: { ideal: CAMERA_HEIGHT },
-            frameRate: { ideal: 30, max: 30 },
-          },
-        });
-
+        const stream = await requestCameraStream(facingMode);
         streamRef.current = stream;
+
         if (!videoRef.current) throw new Error("Camera viewport is not ready.");
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
+        syncCameraAspect();
+
+        const track = stream.getVideoTracks()[0];
+        const actualFacing = track?.getSettings().facingMode;
+        if (facingMode === "environment" && actualFacing && actualFacing !== "environment") {
+          setSourceName(track.label || "Available camera");
+        }
+        if (facingMode === "user" && actualFacing && actualFacing !== "user") {
+          setSourceName(track.label || "Webcam");
+        }
+
         setCameraActive(true);
         lastStartRef.current = 0;
         setRunning(true);
       } catch (caught) {
         stopCamera();
+        setSelectedCamera(null);
         setError(caught instanceof Error ? caught.message : "Camera permission was not granted.");
       }
     },
-    [ensureModel, resetStats, stopCamera],
+    [ensureModel, requestCameraStream, resetStats, stopCamera, syncCameraAspect],
   );
 
   const handleImage = useCallback(
@@ -405,6 +454,7 @@ export default function App() {
       if (!file) return;
 
       stopCamera();
+      setSelectedCamera(null);
       resetStats(0);
       if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
 
@@ -469,8 +519,14 @@ export default function App() {
 
         <div className="media-stage">
           {sourceMode === "camera" ? (
-            <div className="media-layer camera-layer">
-              <video ref={videoRef} playsInline muted className="media" />
+            <div className="media-layer camera-layer" style={{ aspectRatio: cameraAspect }}>
+              <video
+                ref={videoRef}
+                playsInline
+                muted
+                className="media"
+                onLoadedMetadata={syncCameraAspect}
+              />
               {!cameraActive ? <div className="empty-state">Select a camera below to start.</div> : null}
               <canvas ref={canvasRef} className="overlay" />
             </div>
@@ -484,10 +540,11 @@ export default function App() {
           )}
         </div>
 
-        <div className={`metrics ${sourceMode === "image" ? "image-metrics" : ""}`}>
+        <div className="metrics">
           <Metric label="Detections" value={detections.length} />
           <Metric label="Humans" value={humans} />
           <Metric label="Vehicles" value={vehicles} />
+          {displayMode === "all" ? <Metric label="Other objects" value={otherObjects} /> : null}
           {sourceMode === "image" ? (
             <Metric label="Analysis time" value={formatMs(currentMs)} />
           ) : (
@@ -509,13 +566,25 @@ export default function App() {
           <span>1</span>
           <div>
             <h2>Choose source</h2>
-            <p>Camera input is requested at 640 × 360. Images use the complete uploaded frame.</p>
+            <p>
+              Back camera is intended for supported phones. Desktop browsers normally use the available webcam.
+            </p>
           </div>
         </div>
 
         <div className="source-grid">
-          <button className="primary" onClick={() => void startCamera("environment")}>Rear camera</button>
-          <button onClick={() => void startCamera("user")}>Front / webcam</button>
+          <button
+            className={sourceMode === "camera" && selectedCamera === "environment" ? "primary" : undefined}
+            onClick={() => void startCamera("environment")}
+          >
+            Back camera
+          </button>
+          <button
+            className={sourceMode === "camera" && selectedCamera === "user" ? "primary" : undefined}
+            onClick={() => void startCamera("user")}
+          >
+            Front camera / Webcam
+          </button>
           <label className="button-like">
             Upload image
             <input type="file" accept="image/*" onChange={handleImage} />
@@ -528,6 +597,10 @@ export default function App() {
             <button onClick={() => setRunning((value) => !value)}>{running ? "Pause AI" : "Resume AI"}</button>
           ) : null}
         </div>
+
+        <p className="source-note">
+          The visible preview follows the camera's real aspect ratio. YOLOX still runs internally at 416 × 416.
+        </p>
       </section>
 
       <section className="panel controls">
@@ -583,8 +656,8 @@ export default function App() {
           <p>YOLOX Nano runs one inference pass at its native 416 × 416 input.</p>
         </div>
         <div>
-          <strong>Two display modes</strong>
-          <p>Compare the focused Human + Vehicle view with all 80 COCO classes using the same inference.</p>
+          <strong>Natural preview</strong>
+          <p>Camera and image overlays follow the source aspect ratio so boxes stay aligned with the visible media.</p>
         </div>
         <div>
           <strong>Local media</strong>
