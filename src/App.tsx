@@ -49,8 +49,8 @@ type Detection = {
 };
 
 const RUNTIME_URL = "https://esm.sh/libreyolo-web@0.0.6?bundle&deps=onnxruntime-web@1.24.3";
-const MODEL_NAME = "LibreYOLOXn";
-const MODEL_INPUT = 416;
+const MODEL_NAME = "LibreYOLOXs";
+const MODEL_INPUT = 640;
 const CAMERA_WIDTH = 640;
 const CAMERA_HEIGHT = 360;
 const CAMERA_WARMUP_RUNS = 3;
@@ -108,7 +108,7 @@ function Metric({ label, value, note }: { label: string; value: string | number;
 
 export default function App() {
   const [sourceMode, setSourceMode] = useState<SourceMode>("camera");
-  const [displayMode, setDisplayMode] = useState<DisplayMode>("focus");
+  const [displayMode, setDisplayMode] = useState<DisplayMode>("all");
   const [selectedCamera, setSelectedCamera] = useState<FacingMode | null>(null);
   const [cameraAspect, setCameraAspect] = useState("16 / 9");
   const [threshold, setThreshold] = useState(0.3);
@@ -225,7 +225,7 @@ export default function App() {
       return await promise;
     } catch (caught) {
       setModelState("error");
-      const message = caught instanceof Error ? caught.message : "Could not load YOLOX Nano.";
+      const message = caught instanceof Error ? caught.message : "Could not load YOLOX-S.";
       setError(message);
       throw caught;
     } finally {
@@ -487,13 +487,13 @@ export default function App() {
     <main className="page-shell">
       <header className="hero">
         <p className="eyebrow">Browser computer vision demo</p>
-        <h1>Human + Vehicle Detection</h1>
+        <h1>COCO Object Detection</h1>
         <p className="intro">
-          A lightweight YOLOX Nano demo that runs directly in the browser. Human + Vehicle is the
-          default view; All COCO objects can be enabled to compare browser load using the same model.
+          An accuracy-focused YOLOX-S demo running directly in the browser. All 80 COCO classes are shown by
+          default, with an optional Human + Vehicle filter for CCTV-focused testing.
         </p>
         <div className="badges">
-          <span>YOLOX Nano · {MODEL_INPUT}px</span>
+          <span>YOLOX-S · {MODEL_INPUT}px</span>
           <span>{provider.toUpperCase()}</span>
           <span>{displayMode === "focus" ? "Human + Vehicle" : "All COCO · 80 classes"}</span>
         </div>
@@ -599,7 +599,7 @@ export default function App() {
         </div>
 
         <p className="source-note">
-          The visible preview follows the camera's real aspect ratio. YOLOX still runs internally at 416 × 416.
+          The visible preview follows the camera's real aspect ratio. YOLOX-S runs internally at 640 × 640.
         </p>
       </section>
 
@@ -608,7 +608,7 @@ export default function App() {
           <span>2</span>
           <div>
             <h2>Detection set</h2>
-            <p>The model is unchanged. This only controls which YOLOX predictions are displayed.</p>
+            <p>YOLOX-S is the only model. This control only changes which predictions are displayed.</p>
           </div>
         </div>
         <div className="source-grid">
@@ -652,8 +652,8 @@ export default function App() {
 
       <footer className="footer-card">
         <div>
-          <strong>One model</strong>
-          <p>YOLOX Nano runs one inference pass at its native 416 × 416 input.</p>
+          <strong>Accuracy model</strong>
+          <p>YOLOX-S runs one inference pass at its native 640 × 640 input.</p>
         </div>
         <div>
           <strong>Natural preview</strong>
