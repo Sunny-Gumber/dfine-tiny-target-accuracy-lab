@@ -1,6 +1,5 @@
-import type { LIBREYOLO } from "libreyolo-web";
-import { type ChangeEvent, useCallback, useEffect, useRef, useState } from "react";
-import { COCO_DISPLAY_LABELS, ROAD_VEHICLE_CLASS_IDS } from "./coco";
+import { COCO_CLASSES, loadModel, type LIBREYOLO } from "libreyolo-web";
+import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type FacingMode = "environment" | "user";
 type SourceMode = "camera" | "image";
@@ -17,83 +16,37 @@ type Detection = {
   group: DetectionGroup;
 };
 
-type DetectionCounts = {
-  total: number;
-  humans: number;
-  vehicles: number;
-  other: number;
-};
-
-type TimingStats = {
-  current: number;
-  average: number;
-  frames: number;
-};
-
 const MODEL_NAME = "LibreYOLOXs" as const;
 const MODEL_INPUT = 640;
 const DEFAULT_CONFIDENCE = 0.6;
-const NMS_IOU_THRESHOLD = 0.65;
-const MAX_DETECTIONS = 120;
 const CAMERA_WIDTH = 640;
 const CAMERA_HEIGHT = 360;
 const CAMERA_WARMUP_RUNS = 3;
-const TIMING_WINDOW = 30;
-const EMPTY_COUNTS: DetectionCounts = { total: 0, humans: 0, vehicles: 0, other: 0 };
-const EMPTY_TIMING: TimingStats = { current: 0, average: 0, frames: 0 };
+const LOOP_GAP_MS = 16;
+const ROAD_VEHICLE_CLASSES = new Set([1, 2, 3, 5, 7]);
+
+function titleCase(value: string) {
+  return value.replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
 
 function mapDetection(classId: number, mode: DisplayMode): { label: string; group: DetectionGroup } | null {
-  if (classId < 0 || classId >= COCO_DISPLAY_LABELS.length) return null;
+  if (classId < 0 || classId >= COCO_CLASSES.length) return null;
 
   if (mode === "focus") {
     if (classId === 0) return { label: "Human", group: "Human" };
-    if (ROAD_VEHICLE_CLASS_IDS.has(classId)) return { label: "Vehicle", group: "Vehicle" };
+    if (ROAD_VEHICLE_CLASSES.has(classId)) return { label: "Vehicle", group: "Vehicle" };
     return null;
   }
 
   return {
-    label: COCO_DISPLAY_LABELS[classId],
-    group: classId === 0 ? "Human" : ROAD_VEHICLE_CLASS_IDS.has(classId) ? "Vehicle" : "Other",
+    label: titleCase(COCO_CLASSES[classId]),
+    group: classId === 0 ? "Human" : ROAD_VEHICLE_CLASSES.has(classId) ? "Vehicle" : "Other",
   };
 }
 
 function formatMs(value: number) {
   if (!value || !Number.isFinite(value)) return "—";
   return value < 10 ? `${value.toFixed(1)} ms` : `${Math.round(value)} ms`;
-}
-
-function mean(values: number[]) {
-  return values.reduce((sum, value) => sum + value, 0) / values.length;
-}
-
-function waitForPaint() {
-  return new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-}
-
-async function requestCameraStream(facingMode: FacingMode) {
-  const video: MediaTrackConstraints = {
-    facingMode: { ideal: facingMode },
-    width: { ideal: CAMERA_WIDTH },
-    height: { ideal: CAMERA_HEIGHT },
-    frameRate: { ideal: 30, max: 30 },
-  };
-
-  try {
-    return await navigator.mediaDevices.getUserMedia({ audio: false, video });
-  } catch (firstError) {
-    try {
-      return await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          width: { ideal: CAMERA_WIDTH },
-          height: { ideal: CAMERA_HEIGHT },
-          frameRate: { ideal: 30, max: 30 },
-        },
-      });
-    } catch {
-      throw firstError;
-    }
-  }
 }
 
 function Metric({ label, value, note }: { label: string; value: string | number; note?: string }) {
@@ -117,8 +70,10 @@ export default function App() {
   const [modelState, setModelState] = useState<"loading" | "ready" | "error">("loading");
   const [modelProgress, setModelProgress] = useState(0);
   const [provider, setProvider] = useState("waiting");
-  const [counts, setCounts] = useState<DetectionCounts>(EMPTY_COUNTS);
-  const [timing, setTiming] = useState<TimingStats>(EMPTY_TIMING);
+  const [detections, setDetections] = useState<Detection[]>([]);
+  const [currentMs, setCurrentMs] = useState(0);
+  const [averageMs, setAverageMs] = useState(0);
+  const [analysedFrames, setAnalysedFrames] = useState(0);
   const [warmupRemaining, setWarmupRemaining] = useState(CAMERA_WARMUP_RUNS);
   const [error, setError] = useState("");
   const [imageUrl, setImageUrl] = useState("");
@@ -132,12 +87,15 @@ export default function App() {
   const streamRef = useRef<MediaStream | null>(null);
   const objectUrlRef = useRef("");
   const busyRef = useRef(false);
-  const frameRef = useRef<number | null>(null);
+  const loopRef = useRef<number | null>(null);
+  const lastStartRef = useRef(0);
   const timingRef = useRef<number[]>([]);
   const warmupRef = useRef(CAMERA_WARMUP_RUNS);
-  const analysisEpochRef = useRef(0);
 
-  const effectiveFps = timing.average ? 1000 / timing.average : 0;
+  const humans = useMemo(() => detections.filter((item) => item.group === "Human").length, [detections]);
+  const vehicles = useMemo(() => detections.filter((item) => item.group === "Vehicle").length, [detections]);
+  const otherObjects = useMemo(() => detections.filter((item) => item.group === "Other").length, [detections]);
+  const effectiveFps = averageMs ? 1000 / averageMs : 0;
 
   const clearOverlay = useCallback(() => {
     const canvas = canvasRef.current;
@@ -145,14 +103,15 @@ export default function App() {
     canvas.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height);
   }, []);
 
-  const resetAnalysis = useCallback(
+  const resetStats = useCallback(
     (warmups = 0) => {
-      analysisEpochRef.current += 1;
       timingRef.current = [];
       warmupRef.current = warmups;
       setWarmupRemaining(warmups);
-      setCounts(EMPTY_COUNTS);
-      setTiming(EMPTY_TIMING);
+      setCurrentMs(0);
+      setAverageMs(0);
+      setAnalysedFrames(0);
+      setDetections([]);
       clearOverlay();
     },
     [clearOverlay],
@@ -164,14 +123,6 @@ export default function App() {
     if (videoRef.current) videoRef.current.srcObject = null;
     setCameraActive(false);
     setRunning(false);
-  }, []);
-
-  const clearImage = useCallback(() => {
-    if (objectUrlRef.current) {
-      URL.revokeObjectURL(objectUrlRef.current);
-      objectUrlRef.current = "";
-    }
-    setImageUrl("");
   }, []);
 
   const syncCameraAspect = useCallback(() => {
@@ -188,18 +139,16 @@ export default function App() {
     setModelProgress(2);
     setError("");
 
-    const promise = import("libreyolo-web").then(({ loadModel }) =>
-      loadModel(MODEL_NAME, {
-        device: ["webgpu", "wasm"],
-        modelFamily: "yolox",
-        confThres: DEFAULT_CONFIDENCE,
-        iouThres: NMS_IOU_THRESHOLD,
-        maxDet: MAX_DETECTIONS,
-        onProgress: (progress) => {
-          setModelProgress(Math.max(2, Math.min(99, Math.round(progress * 100))));
-        },
-      }),
-    );
+    const promise = loadModel(MODEL_NAME, {
+      device: ["webgpu", "wasm"],
+      modelFamily: "yolox",
+      confThres: 0.12,
+      iouThres: 0.65,
+      maxDet: 120,
+      onProgress: (progress) => {
+        setModelProgress(Math.max(2, Math.min(99, Math.round(progress * 100))));
+      },
+    });
 
     modelPromiseRef.current = promise;
 
@@ -212,7 +161,8 @@ export default function App() {
       return model;
     } catch (caught) {
       setModelState("error");
-      setError(caught instanceof Error ? caught.message : "Could not load YOLOX-S.");
+      const message = caught instanceof Error ? caught.message : "Could not load YOLOX-S.";
+      setError(message);
       throw caught;
     } finally {
       modelPromiseRef.current = null;
@@ -225,13 +175,10 @@ export default function App() {
 
   useEffect(() => {
     return () => {
-      analysisEpochRef.current += 1;
-      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+      if (loopRef.current !== null) cancelAnimationFrame(loopRef.current);
       streamRef.current?.getTracks().forEach((track) => track.stop());
       if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
-      const model = modelRef.current;
-      modelRef.current = null;
-      void model?.release();
+      void modelRef.current?.release();
     };
   }, []);
 
@@ -276,78 +223,67 @@ export default function App() {
 
   const analyseSource = useCallback(
     async (source: HTMLVideoElement | HTMLImageElement, live: boolean) => {
-      if (busyRef.current) return false;
+      if (busyRef.current) return;
 
       const width = source instanceof HTMLVideoElement ? source.videoWidth : source.naturalWidth;
       const height = source instanceof HTMLVideoElement ? source.videoHeight : source.naturalHeight;
-      if (!width || !height) return live;
+      if (!width || !height) return;
 
-      const epoch = analysisEpochRef.current;
       busyRef.current = true;
 
       try {
         const model = await ensureModel();
         const started = performance.now();
         const result = await model.predict(source, {
-          confThres: threshold,
-          iouThres: NMS_IOU_THRESHOLD,
-          maxDet: MAX_DETECTIONS,
+          confThres: Math.max(0.08, threshold),
+          iouThres: 0.65,
+          maxDet: 120,
         });
         const elapsed = performance.now() - started;
 
-        if (epoch !== analysisEpochRef.current) return false;
+        const items = result.detections
+          .map((item): Detection | null => {
+            if (item.confidence < threshold) return null;
+            const mapped = mapDetection(item.classId, displayMode);
+            if (!mapped) return null;
 
-        const items: Detection[] = [];
-        const nextCounts: DetectionCounts = { total: 0, humans: 0, vehicles: 0, other: 0 };
+            return {
+              x1: item.bbox[0],
+              y1: item.bbox[1],
+              x2: item.bbox[2],
+              y2: item.bbox[3],
+              confidence: item.confidence,
+              label: mapped.label,
+              group: mapped.group,
+            };
+          })
+          .filter((item): item is Detection => item !== null);
 
-        for (const item of result.detections) {
-          const mapped = mapDetection(item.classId, displayMode);
-          if (!mapped) continue;
-
-          items.push({
-            x1: item.bbox[0],
-            y1: item.bbox[1],
-            x2: item.bbox[2],
-            y2: item.bbox[3],
-            confidence: item.confidence,
-            label: mapped.label,
-            group: mapped.group,
-          });
-
-          nextCounts.total += 1;
-          if (mapped.group === "Human") nextCounts.humans += 1;
-          else if (mapped.group === "Vehicle") nextCounts.vehicles += 1;
-          else nextCounts.other += 1;
-        }
-
-        setCounts(nextCounts);
+        setDetections(items);
+        setProvider(model.provider || "wasm");
         drawDetections(items, width, height);
 
         if (live && warmupRef.current > 0) {
           warmupRef.current -= 1;
           setWarmupRemaining(warmupRef.current);
-          return true;
+          return;
         }
 
         if (live) {
-          timingRef.current = [...timingRef.current.slice(-(TIMING_WINDOW - 1)), elapsed];
-          setTiming((previous) => ({
-            current: elapsed,
-            average: mean(timingRef.current),
-            frames: previous.frames + 1,
-          }));
+          timingRef.current = [...timingRef.current.slice(-29), elapsed];
+          const mean = timingRef.current.reduce((sum, value) => sum + value, 0) / timingRef.current.length;
+          setCurrentMs(elapsed);
+          setAverageMs(mean);
+          setAnalysedFrames((count) => count + 1);
         } else {
           timingRef.current = [elapsed];
-          setTiming({ current: elapsed, average: elapsed, frames: 1 });
+          setCurrentMs(elapsed);
+          setAverageMs(elapsed);
+          setAnalysedFrames(1);
         }
-
-        return true;
       } catch (caught) {
-        if (epoch === analysisEpochRef.current) {
-          setRunning(false);
-          setError(caught instanceof Error ? caught.message : "Inference failed.");
-        }
-        return false;
+        setRunning(false);
+        setError(caught instanceof Error ? caught.message : "Inference failed.");
       } finally {
         busyRef.current = false;
       }
@@ -360,134 +296,135 @@ export default function App() {
 
     let cancelled = false;
 
-    const scheduleNext = () => {
-      if (cancelled) return;
-      frameRef.current = requestAnimationFrame(() => void tick());
-    };
-
-    const tick = async () => {
+    const tick = (now: number) => {
       if (cancelled) return;
 
-      if (busyRef.current || !videoRef.current) {
-        scheduleNext();
-        return;
+      if (!busyRef.current && now - lastStartRef.current >= LOOP_GAP_MS && videoRef.current) {
+        lastStartRef.current = now;
+        void analyseSource(videoRef.current, true);
       }
 
-      const shouldContinue = await analyseSource(videoRef.current, true);
-      if (!cancelled && shouldContinue) scheduleNext();
+      loopRef.current = requestAnimationFrame(tick);
     };
 
-    scheduleNext();
+    loopRef.current = requestAnimationFrame(tick);
 
     return () => {
       cancelled = true;
-      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
-      frameRef.current = null;
+      if (loopRef.current !== null) cancelAnimationFrame(loopRef.current);
+      loopRef.current = null;
     };
   }, [analyseSource, running, sourceMode]);
 
-  async function startCamera(facingMode: FacingMode) {
-    stopCamera();
-    clearImage();
-    resetAnalysis(CAMERA_WARMUP_RUNS);
-    setSourceMode("camera");
-    setSelectedCamera(facingMode);
-    setSourceName(facingMode === "environment" ? "Back camera" : "Front camera / Webcam");
-    setError("");
-
-    const epoch = analysisEpochRef.current;
-    let stream: MediaStream | null = null;
+  const requestCameraStream = useCallback(async (facingMode: FacingMode) => {
+    const constraints: MediaStreamConstraints = {
+      audio: false,
+      video: {
+        facingMode: { ideal: facingMode },
+        width: { ideal: CAMERA_WIDTH },
+        height: { ideal: CAMERA_HEIGHT },
+        frameRate: { ideal: 30, max: 30 },
+      },
+    };
 
     try {
-      if (!navigator.mediaDevices?.getUserMedia) {
-        throw new Error("Camera access requires HTTPS and a supported browser.");
+      return await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (firstError) {
+      try {
+        return await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            width: { ideal: CAMERA_WIDTH },
+            height: { ideal: CAMERA_HEIGHT },
+            frameRate: { ideal: 30, max: 30 },
+          },
+        });
+      } catch {
+        throw firstError;
       }
+    }
+  }, []);
 
-      const modelPromise = ensureModel();
-      stream = await requestCameraStream(facingMode);
-      await modelPromise;
+  const startCamera = useCallback(
+    async (facingMode: FacingMode) => {
+      stopCamera();
+      resetStats(CAMERA_WARMUP_RUNS);
+      setSourceMode("camera");
+      setSelectedCamera(facingMode);
+      setSourceName(facingMode === "environment" ? "Back camera" : "Front camera / Webcam");
+      setError("");
 
-      if (epoch !== analysisEpochRef.current) {
-        stream.getTracks().forEach((track) => track.stop());
-        return;
+      try {
+        if (!navigator.mediaDevices?.getUserMedia) {
+          throw new Error("Camera access requires HTTPS and a supported browser.");
+        }
+
+        await ensureModel();
+        const stream = await requestCameraStream(facingMode);
+        streamRef.current = stream;
+
+        if (!videoRef.current) throw new Error("Camera viewport is not ready.");
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+        syncCameraAspect();
+
+        const track = stream.getVideoTracks()[0];
+        const actualFacing = track?.getSettings().facingMode;
+
+        if (facingMode === "environment" && actualFacing && actualFacing !== "environment") {
+          setSourceName(track.label || "Available camera");
+        }
+        if (facingMode === "user" && actualFacing && actualFacing !== "user") {
+          setSourceName(track.label || "Webcam");
+        }
+
+        setCameraActive(true);
+        lastStartRef.current = 0;
+        setRunning(true);
+      } catch (caught) {
+        stopCamera();
+        setSelectedCamera(null);
+        setError(caught instanceof Error ? caught.message : "Camera permission was not granted.");
       }
+    },
+    [ensureModel, requestCameraStream, resetStats, stopCamera, syncCameraAspect],
+  );
 
-      streamRef.current = stream;
-      await waitForPaint();
-
-      const video = videoRef.current;
-      if (!video) throw new Error("Camera viewport is not ready.");
-
-      video.srcObject = stream;
-      await video.play();
-      syncCameraAspect();
-
-      const track = stream.getVideoTracks()[0];
-      const actualFacing = track?.getSettings().facingMode;
-
-      if (facingMode === "environment" && actualFacing && actualFacing !== "environment") {
-        setSourceName(track.label || "Available camera");
-      } else if (facingMode === "user" && actualFacing && actualFacing !== "user") {
-        setSourceName(track.label || "Webcam");
-      }
-
-      setCameraActive(true);
-      setRunning(true);
-    } catch (caught) {
-      stream?.getTracks().forEach((track) => track.stop());
-      if (epoch !== analysisEpochRef.current) return;
+  const handleImage = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
 
       stopCamera();
       setSelectedCamera(null);
-      setError(caught instanceof Error ? caught.message : "Camera permission was not granted.");
-    }
-  }
+      resetStats(0);
 
-  function handleImage(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
+      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
 
-    stopCamera();
-    setSelectedCamera(null);
-    resetAnalysis(0);
+      const url = URL.createObjectURL(file);
+      objectUrlRef.current = url;
+      setImageUrl(url);
+      setSourceMode("image");
+      setSourceName(file.name);
+      setError("");
+      event.target.value = "";
+    },
+    [resetStats, stopCamera],
+  );
 
-    if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+  const analyseImage = useCallback(async () => {
+    if (!imageRef.current || !imageUrl) return;
+    resetStats(0);
+    await analyseSource(imageRef.current, false);
+  }, [analyseSource, imageUrl, resetStats]);
 
-    const url = URL.createObjectURL(file);
-    objectUrlRef.current = url;
-    setImageUrl(url);
-    setSourceMode("image");
-    setSourceName(file.name);
-    setError("");
-    event.target.value = "";
-  }
-
-  async function analyseImage() {
-    const image = imageRef.current;
-    if (!image || !imageUrl) return;
-
-    resetAnalysis(0);
-    setError("");
-
-    try {
-      if (!image.complete || !image.naturalWidth) await image.decode();
-      if (!image.naturalWidth || !image.naturalHeight) throw new Error("The selected image could not be decoded.");
-      await analyseSource(image, false);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "The selected image could not be decoded.");
-    }
-  }
-
-  function changeDisplayMode(mode: DisplayMode) {
-    if (mode === displayMode) return;
-    setDisplayMode(mode);
-    resetAnalysis(0);
-  }
-
-  function changeThreshold(event: ChangeEvent<HTMLInputElement>) {
-    setThreshold(Number(event.target.value) / 100);
-    resetAnalysis(0);
-  }
+  const changeDisplayMode = useCallback(
+    (mode: DisplayMode) => {
+      setDisplayMode(mode);
+      resetStats(0);
+    },
+    [resetStats],
+  );
 
   return (
     <main className="page-shell">
@@ -515,13 +452,11 @@ export default function App() {
             <i />
             {modelState === "loading"
               ? `Loading model ${modelProgress}%`
-              : modelState === "error"
-                ? "Model error"
-                : running
-                  ? "Analysing"
-                  : sourceMode === "image" && imageUrl
-                    ? "Image ready"
-                    : "Ready"}
+              : running
+                ? "Analysing"
+                : sourceMode === "image" && imageUrl
+                  ? "Image ready"
+                  : "Ready"}
           </div>
         </div>
 
@@ -543,19 +478,19 @@ export default function App() {
         </div>
 
         <div className="metrics">
-          <Metric label="Detections" value={counts.total} />
-          <Metric label="Humans" value={counts.humans} />
-          <Metric label="Vehicles" value={counts.vehicles} />
-          {displayMode === "all" ? <Metric label="Other objects" value={counts.other} /> : null}
+          <Metric label="Detections" value={detections.length} />
+          <Metric label="Humans" value={humans} />
+          <Metric label="Vehicles" value={vehicles} />
+          {displayMode === "all" ? <Metric label="Other objects" value={otherObjects} /> : null}
           {sourceMode === "image" ? (
-            <Metric label="Analysis time" value={formatMs(timing.current)} />
+            <Metric label="Analysis time" value={formatMs(currentMs)} />
           ) : (
             <>
-              <Metric label="Current" value={formatMs(timing.current)} />
+              <Metric label="Current" value={formatMs(currentMs)} />
               <Metric
                 label="Stable average"
-                value={formatMs(timing.average)}
-                note={timing.frames ? `${timing.frames} timed frames` : undefined}
+                value={formatMs(averageMs)}
+                note={analysedFrames ? `${analysedFrames} timed frames` : undefined}
               />
               <Metric label="Effective" value={effectiveFps ? `${effectiveFps.toFixed(1)} FPS` : "—"} />
             </>
@@ -590,7 +525,7 @@ export default function App() {
             <input type="file" accept="image/*" onChange={handleImage} />
           </label>
           {sourceMode === "image" ? (
-            <button onClick={() => void analyseImage()} disabled={!imageUrl || modelState === "loading"}>
+            <button onClick={() => void analyseImage()} disabled={!imageUrl || modelState !== "ready"}>
               Analyse image
             </button>
           ) : cameraActive ? (
@@ -612,7 +547,10 @@ export default function App() {
           </div>
         </div>
         <div className="source-grid">
-          <button className={displayMode === "all" ? "primary" : undefined} onClick={() => changeDisplayMode("all")}>
+          <button
+            className={displayMode === "all" ? "primary" : undefined}
+            onClick={() => changeDisplayMode("all")}
+          >
             All COCO objects (80)
           </button>
           <button
@@ -639,7 +577,7 @@ export default function App() {
             max="80"
             step="1"
             value={Math.round(threshold * 100)}
-            onChange={changeThreshold}
+            onChange={(event) => setThreshold(Number(event.target.value) / 100)}
           />
           <strong>{Math.round(threshold * 100)}%</strong>
         </div>
