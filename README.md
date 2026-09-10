@@ -1,32 +1,40 @@
-# Browser Human + Vehicle Detection
+# YOLOX-S Browser Object Detection
 
-A small browser demo for detecting people and road vehicles from a webcam, mobile camera, or uploaded image.
+A small browser-based object detection demo using **YOLOX-S** and the **COCO 80-class dataset**.
 
 **Live demo:** https://sunny-gumber.github.io/dfine-tiny-target-accuracy-lab/
 
-## What it does
+The project is intentionally simple: choose a camera or upload an image, run inference locally in the browser, and draw the detections over the source.
 
-- Runs YOLOX Nano directly in the browser
-- Uses WebGPU when available, with WASM as a fallback
-- Supports rear camera, front camera/webcam, and image upload
-- Keeps the public output simple: **Human** and **Vehicle**
-- Shows live inference time and a rolling FPS estimate for camera input
-- Does not upload camera frames or images to an application server
+## Features
 
-## Current setup
+- YOLOX-S at its native **640 × 640** model input
+- All **80 COCO classes** enabled by default
+- Default confidence threshold: **60%**
+- Optional Human + Vehicle display filter for CCTV-focused tests
+- Back camera, front camera/webcam, and image upload
+- WebGPU when available, with WASM fallback
+- Live inference timing and rolling effective FPS
+- Camera frames and uploaded images stay in the browser during inference
 
-The model uses its native **416 × 416** input. For live use, the browser requests a **640 × 360** camera stream to keep capture and rendering overhead reasonable. Uploaded images are analysed as a complete frame and are resized by the model preprocessor.
+## Tech stack
 
-The underlying COCO road-vehicle classes (bicycle, car, motorcycle, bus and truck) are grouped into one `Vehicle` label. This avoids presenting fine-grained vehicle classification as something the model was not tuned for in Indian traffic scenes.
+- React
+- TypeScript
+- Vite
+- LibreYOLO Web
+- ONNX Runtime Web
 
 ## Run locally
+
+Requirements: Node.js 22 or newer.
 
 ```bash
 npm install
 npm run dev
 ```
 
-Then open the local Vite URL in a browser. Camera access requires a secure context (`https://` or localhost).
+Open the Vite development URL in your browser. Camera access requires localhost or HTTPS.
 
 ## Build
 
@@ -34,10 +42,41 @@ Then open the local Vite URL in a browser. Camera access requires a secure conte
 npm run build
 ```
 
-GitHub Actions publishes the `dist` folder to GitHub Pages on pushes to `main`.
+The build command runs the TypeScript check first and then creates the production bundle in `dist/`.
 
-## Notes
+## Project structure
 
-This is an engineering demo, not a production surveillance system. Detection quality depends on target size, lighting, occlusion, camera angle, browser runtime and device performance. The displayed FPS is an inference-rate estimate based on measured model latency; it is not the camera capture frame rate.
+```text
+.
+├── .github/workflows/pages.yml   # GitHub Pages deployment
+├── src/
+│   ├── App.tsx                   # camera, inference and UI logic
+│   ├── main.tsx                  # React entry point
+│   └── styles.css                # application styles
+├── index.html
+├── package.json
+├── tsconfig.json
+└── vite.config.ts
+```
 
-The model/runtime is downloaded on first use, so the first load can take longer than later runs.
+## Detection modes
+
+**All COCO objects** is the default mode. Labels use the standard COCO class names.
+
+**Human + Vehicle** is only a display filter. It keeps `person` as Human and groups bicycle, car, motorcycle, bus, and truck as Vehicle. The underlying YOLOX-S inference pass is unchanged.
+
+## Performance notes
+
+YOLOX-S is heavier than YOLOX Nano, so browser speed depends strongly on the device and execution provider. The displayed effective FPS is calculated from measured inference latency; it is not the camera capture frame rate.
+
+For camera input the browser requests a 640 × 360 stream, while the model preprocessor converts the frame to the model's 640 × 640 input. Uploaded images are analysed as complete frames.
+
+## Scope
+
+This is an engineering/demo project, not a production surveillance system. Detection quality varies with target size, lighting, occlusion, camera angle, motion blur, browser support, and device performance.
+
+The model/runtime is downloaded on first use, so the first page load can take longer than later visits.
+
+## Acknowledgements
+
+Browser inference is provided by [LibreYOLO Web](https://github.com/LibreYOLO/libreyolo-web), which uses ONNX Runtime Web for WebGPU/WASM execution.
