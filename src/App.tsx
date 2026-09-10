@@ -1,42 +1,10 @@
+import { COCO_CLASSES, loadModel, type LIBREYOLO } from "libreyolo-web";
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type FacingMode = "environment" | "user";
 type SourceMode = "camera" | "image";
 type DisplayMode = "focus" | "all";
 type DetectionGroup = "Human" | "Vehicle" | "Other";
-
-type RuntimeDetection = {
-  classId: number;
-  confidence: number;
-  bbox: [number, number, number, number];
-};
-
-type RuntimeResult = {
-  detections: RuntimeDetection[];
-};
-
-type RuntimeModel = {
-  predict: (
-    input: HTMLVideoElement | HTMLImageElement,
-    options?: { confThres?: number; iouThres?: number; maxDet?: number },
-  ) => Promise<RuntimeResult>;
-  release: () => Promise<void>;
-  provider: "webgpu" | "wasm" | null;
-};
-
-type RuntimeModule = {
-  loadModel: (
-    source: string,
-    options?: {
-      confThres?: number;
-      iouThres?: number;
-      maxDet?: number;
-      device?: "auto" | "webgpu" | "wasm" | ("webgpu" | "wasm")[];
-      modelFamily?: "yolox" | "auto";
-      onProgress?: (progress: number) => void;
-    },
-  ) => Promise<RuntimeModel>;
-};
 
 type Detection = {
   x1: number;
@@ -48,46 +16,31 @@ type Detection = {
   group: DetectionGroup;
 };
 
-const RUNTIME_URL = "https://esm.sh/libreyolo-web@0.0.6?bundle&deps=onnxruntime-web@1.24.3";
-const MODEL_NAME = "LibreYOLOXs";
+const MODEL_NAME = "LibreYOLOXs" as const;
 const MODEL_INPUT = 640;
+const DEFAULT_CONFIDENCE = 0.6;
 const CAMERA_WIDTH = 640;
 const CAMERA_HEIGHT = 360;
 const CAMERA_WARMUP_RUNS = 3;
 const LOOP_GAP_MS = 16;
 const ROAD_VEHICLE_CLASSES = new Set([1, 2, 3, 5, 7]);
 
-const COCO_LABELS = [
-  "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
-  "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog",
-  "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
-  "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite",
-  "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle",
-  "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich",
-  "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
-  "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote",
-  "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book",
-  "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
-] as const;
-
 function titleCase(value: string) {
   return value.replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function mapDetection(classId: number, mode: DisplayMode): { label: string; group: DetectionGroup } | null {
-  if (classId === 0) return { label: "Human", group: "Human" };
+  if (classId < 0 || classId >= COCO_CLASSES.length) return null;
 
   if (mode === "focus") {
+    if (classId === 0) return { label: "Human", group: "Human" };
     if (ROAD_VEHICLE_CLASSES.has(classId)) return { label: "Vehicle", group: "Vehicle" };
     return null;
   }
 
-  const className = COCO_LABELS[classId];
-  if (!className) return null;
-
   return {
-    label: titleCase(className),
-    group: ROAD_VEHICLE_CLASSES.has(classId) ? "Vehicle" : "Other",
+    label: titleCase(COCO_CLASSES[classId]),
+    group: classId === 0 ? "Human" : ROAD_VEHICLE_CLASSES.has(classId) ? "Vehicle" : "Other",
   };
 }
 
@@ -111,7 +64,7 @@ export default function App() {
   const [displayMode, setDisplayMode] = useState<DisplayMode>("all");
   const [selectedCamera, setSelectedCamera] = useState<FacingMode | null>(null);
   const [cameraAspect, setCameraAspect] = useState("16 / 9");
-  const [threshold, setThreshold] = useState(0.6);
+  const [threshold, setThreshold] = useState(DEFAULT_CONFIDENCE);
   const [running, setRunning] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
   const [modelState, setModelState] = useState<"loading" | "ready" | "error">("loading");
@@ -129,9 +82,8 @@ export default function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const modelRef = useRef<RuntimeModel | null>(null);
-  const runtimeRef = useRef<RuntimeModule | null>(null);
-  const modelPromiseRef = useRef<Promise<RuntimeModel> | null>(null);
+  const modelRef = useRef<LIBREYOLO | null>(null);
+  const modelPromiseRef = useRef<Promise<LIBREYOLO> | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const objectUrlRef = useRef("");
   const busyRef = useRef(false);
@@ -140,18 +92,9 @@ export default function App() {
   const timingRef = useRef<number[]>([]);
   const warmupRef = useRef(CAMERA_WARMUP_RUNS);
 
-  const humans = useMemo(
-    () => detections.filter((item) => item.group === "Human").length,
-    [detections],
-  );
-  const vehicles = useMemo(
-    () => detections.filter((item) => item.group === "Vehicle").length,
-    [detections],
-  );
-  const otherObjects = useMemo(
-    () => detections.filter((item) => item.group === "Other").length,
-    [detections],
-  );
+  const humans = useMemo(() => detections.filter((item) => item.group === "Human").length, [detections]);
+  const vehicles = useMemo(() => detections.filter((item) => item.group === "Vehicle").length, [detections]);
+  const otherObjects = useMemo(() => detections.filter((item) => item.group === "Other").length, [detections]);
   const effectiveFps = averageMs ? 1000 / averageMs : 0;
 
   const clearOverlay = useCallback(() => {
@@ -196,33 +139,26 @@ export default function App() {
     setModelProgress(2);
     setError("");
 
-    const promise = (async () => {
-      if (!runtimeRef.current) {
-        const moduleUrl: string = RUNTIME_URL;
-        runtimeRef.current = (await import(/* @vite-ignore */ moduleUrl)) as unknown as RuntimeModule;
-      }
+    const promise = loadModel(MODEL_NAME, {
+      device: ["webgpu", "wasm"],
+      modelFamily: "yolox",
+      confThres: 0.12,
+      iouThres: 0.65,
+      maxDet: 120,
+      onProgress: (progress) => {
+        setModelProgress(Math.max(2, Math.min(99, Math.round(progress * 100))));
+      },
+    });
 
-      const model = await runtimeRef.current.loadModel(MODEL_NAME, {
-        device: ["webgpu", "wasm"],
-        modelFamily: "yolox",
-        confThres: 0.12,
-        iouThres: 0.65,
-        maxDet: 120,
-        onProgress: (progress) => {
-          setModelProgress(Math.max(2, Math.min(99, Math.round(progress * 100))));
-        },
-      });
+    modelPromiseRef.current = promise;
 
+    try {
+      const model = await promise;
       modelRef.current = model;
       setProvider(model.provider || "wasm");
       setModelProgress(100);
       setModelState("ready");
       return model;
-    })();
-
-    modelPromiseRef.current = promise;
-    try {
-      return await promise;
     } catch (caught) {
       setModelState("error");
       const message = caught instanceof Error ? caught.message : "Could not load YOLOX-S.";
@@ -294,6 +230,7 @@ export default function App() {
       if (!width || !height) return;
 
       busyRef.current = true;
+
       try {
         const model = await ensureModel();
         const started = performance.now();
@@ -358,16 +295,20 @@ export default function App() {
     if (!running || sourceMode !== "camera") return;
 
     let cancelled = false;
+
     const tick = (now: number) => {
       if (cancelled) return;
+
       if (!busyRef.current && now - lastStartRef.current >= LOOP_GAP_MS && videoRef.current) {
         lastStartRef.current = now;
         void analyseSource(videoRef.current, true);
       }
+
       loopRef.current = requestAnimationFrame(tick);
     };
 
     loopRef.current = requestAnimationFrame(tick);
+
     return () => {
       cancelled = true;
       if (loopRef.current !== null) cancelAnimationFrame(loopRef.current);
@@ -429,6 +370,7 @@ export default function App() {
 
         const track = stream.getVideoTracks()[0];
         const actualFacing = track?.getSettings().facingMode;
+
         if (facingMode === "environment" && actualFacing && actualFacing !== "environment") {
           setSourceName(track.label || "Available camera");
         }
@@ -456,6 +398,7 @@ export default function App() {
       stopCamera();
       setSelectedCamera(null);
       resetStats(0);
+
       if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
 
       const url = URL.createObjectURL(file);
@@ -489,8 +432,8 @@ export default function App() {
         <p className="eyebrow">Browser computer vision demo</p>
         <h1>COCO Object Detection</h1>
         <p className="intro">
-          An accuracy-focused YOLOX-S demo running directly in the browser. All 80 COCO classes are shown by
-          default, with an optional Human + Vehicle filter for CCTV-focused testing.
+          YOLOX-S runs locally in the browser with a 640 × 640 model input. All 80 COCO classes are shown by
+          default, with an optional Human + Vehicle view for CCTV-focused testing.
         </p>
         <div className="badges">
           <span>YOLOX-S · {MODEL_INPUT}px</span>
@@ -520,13 +463,7 @@ export default function App() {
         <div className="media-stage">
           {sourceMode === "camera" ? (
             <div className="media-layer camera-layer" style={{ aspectRatio: cameraAspect }}>
-              <video
-                ref={videoRef}
-                playsInline
-                muted
-                className="media"
-                onLoadedMetadata={syncCameraAspect}
-              />
+              <video ref={videoRef} playsInline muted className="media" onLoadedMetadata={syncCameraAspect} />
               {!cameraActive ? <div className="empty-state">Select a camera below to start.</div> : null}
               <canvas ref={canvasRef} className="overlay" />
             </div>
@@ -566,9 +503,7 @@ export default function App() {
           <span>1</span>
           <div>
             <h2>Choose source</h2>
-            <p>
-              Back camera is intended for supported phones. Desktop browsers normally use the available webcam.
-            </p>
+            <p>Use a phone camera, webcam, or an uploaded image.</p>
           </div>
         </div>
 
@@ -599,7 +534,7 @@ export default function App() {
         </div>
 
         <p className="source-note">
-          The visible preview follows the camera's real aspect ratio. YOLOX-S runs internally at 640 × 640.
+          The visible preview keeps the source aspect ratio. YOLOX-S runs internally at 640 × 640.
         </p>
       </section>
 
@@ -608,21 +543,21 @@ export default function App() {
           <span>2</span>
           <div>
             <h2>Detection set</h2>
-            <p>YOLOX-S is the only model. This control only changes which predictions are displayed.</p>
+            <p>YOLOX-S is the only model. This control only changes which detections are displayed.</p>
           </div>
         </div>
         <div className="source-grid">
-          <button
-            className={displayMode === "focus" ? "primary" : undefined}
-            onClick={() => changeDisplayMode("focus")}
-          >
-            Human + Vehicle
-          </button>
           <button
             className={displayMode === "all" ? "primary" : undefined}
             onClick={() => changeDisplayMode("all")}
           >
             All COCO objects (80)
+          </button>
+          <button
+            className={displayMode === "focus" ? "primary" : undefined}
+            onClick={() => changeDisplayMode("focus")}
+          >
+            Human + Vehicle
           </button>
         </div>
       </section>
@@ -632,7 +567,7 @@ export default function App() {
           <span>3</span>
           <div>
             <h2>Detection confidence</h2>
-            <p>Lower values find more candidates but can also increase false detections.</p>
+            <p>Default is 60%. Lower values find more candidates but may also add false detections.</p>
           </div>
         </div>
         <div className="slider-row">
@@ -652,12 +587,12 @@ export default function App() {
 
       <footer className="footer-card">
         <div>
-          <strong>Accuracy model</strong>
-          <p>YOLOX-S runs one inference pass at its native 640 × 640 input.</p>
+          <strong>YOLOX-S</strong>
+          <p>One accuracy-focused model running at its native 640 × 640 input.</p>
         </div>
         <div>
-          <strong>Natural preview</strong>
-          <p>Camera and image overlays follow the source aspect ratio so boxes stay aligned with the visible media.</p>
+          <strong>WebGPU first</strong>
+          <p>WebGPU is preferred when available, with WASM as the fallback runtime.</p>
         </div>
         <div>
           <strong>Local media</strong>
