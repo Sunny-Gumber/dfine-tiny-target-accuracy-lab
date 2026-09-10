@@ -1,5 +1,6 @@
-import { COCO_CLASSES, loadModel, type LIBREYOLO } from "libreyolo-web";
+import type { LIBREYOLO } from "libreyolo-web";
 import { type ChangeEvent, useCallback, useEffect, useRef, useState } from "react";
+import { COCO_DISPLAY_LABELS, ROAD_VEHICLE_CLASS_IDS } from "./coco";
 
 type FacingMode = "environment" | "user";
 type SourceMode = "camera" | "image";
@@ -38,28 +39,21 @@ const CAMERA_WIDTH = 640;
 const CAMERA_HEIGHT = 360;
 const CAMERA_WARMUP_RUNS = 3;
 const TIMING_WINDOW = 30;
-const ROAD_VEHICLE_CLASSES = new Set([1, 2, 3, 5, 7]);
 const EMPTY_COUNTS: DetectionCounts = { total: 0, humans: 0, vehicles: 0, other: 0 };
 const EMPTY_TIMING: TimingStats = { current: 0, average: 0, frames: 0 };
-
-function titleCase(value: string) {
-  return value.replace(/\b\w/g, (letter) => letter.toUpperCase());
-}
-
-const COCO_DISPLAY_LABELS = COCO_CLASSES.map(titleCase);
 
 function mapDetection(classId: number, mode: DisplayMode): { label: string; group: DetectionGroup } | null {
   if (classId < 0 || classId >= COCO_DISPLAY_LABELS.length) return null;
 
   if (mode === "focus") {
     if (classId === 0) return { label: "Human", group: "Human" };
-    if (ROAD_VEHICLE_CLASSES.has(classId)) return { label: "Vehicle", group: "Vehicle" };
+    if (ROAD_VEHICLE_CLASS_IDS.has(classId)) return { label: "Vehicle", group: "Vehicle" };
     return null;
   }
 
   return {
     label: COCO_DISPLAY_LABELS[classId],
-    group: classId === 0 ? "Human" : ROAD_VEHICLE_CLASSES.has(classId) ? "Vehicle" : "Other",
+    group: classId === 0 ? "Human" : ROAD_VEHICLE_CLASS_IDS.has(classId) ? "Vehicle" : "Other",
   };
 }
 
@@ -194,16 +188,18 @@ export default function App() {
     setModelProgress(2);
     setError("");
 
-    const promise = loadModel(MODEL_NAME, {
-      device: ["webgpu", "wasm"],
-      modelFamily: "yolox",
-      confThres: DEFAULT_CONFIDENCE,
-      iouThres: NMS_IOU_THRESHOLD,
-      maxDet: MAX_DETECTIONS,
-      onProgress: (progress) => {
-        setModelProgress(Math.max(2, Math.min(99, Math.round(progress * 100))));
-      },
-    });
+    const promise = import("libreyolo-web").then(({ loadModel }) =>
+      loadModel(MODEL_NAME, {
+        device: ["webgpu", "wasm"],
+        modelFamily: "yolox",
+        confThres: DEFAULT_CONFIDENCE,
+        iouThres: NMS_IOU_THRESHOLD,
+        maxDet: MAX_DETECTIONS,
+        onProgress: (progress) => {
+          setModelProgress(Math.max(2, Math.min(99, Math.round(progress * 100))));
+        },
+      }),
+    );
 
     modelPromiseRef.current = promise;
 
@@ -233,7 +229,9 @@ export default function App() {
       if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
       streamRef.current?.getTracks().forEach((track) => track.stop());
       if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
-      void modelRef.current?.release();
+      const model = modelRef.current;
+      modelRef.current = null;
+      void model?.release();
     };
   }, []);
 
