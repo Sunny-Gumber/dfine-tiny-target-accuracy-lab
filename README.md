@@ -30,11 +30,13 @@ The project is intentionally simple: choose a camera or upload an image, run inf
 Requirements: Node.js 22 or newer.
 
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
 Open the Vite development URL in your browser. Camera access requires localhost or HTTPS.
+
+Use `npm install` when intentionally changing dependencies so the lock file is updated with `package.json`.
 
 ## Build
 
@@ -58,6 +60,7 @@ The build command runs the TypeScript check first and then creates the productio
 │   └── styles.css                # application styles
 ├── index.html
 ├── package.json
+├── package-lock.json
 ├── tsconfig.json
 └── vite.config.ts
 ```
