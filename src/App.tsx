@@ -333,11 +333,11 @@ export default function App() {
 
         if (live) {
           timingRef.current = [...timingRef.current.slice(-(TIMING_WINDOW - 1)), elapsed];
-          setTiming({
+          setTiming((previous) => ({
             current: elapsed,
             average: mean(timingRef.current),
-            frames: timing.frames + 1,
-          });
+            frames: previous.frames + 1,
+          }));
         } else {
           timingRef.current = [elapsed];
           setTiming({ current: elapsed, average: elapsed, frames: 1 });
@@ -354,7 +354,7 @@ export default function App() {
         busyRef.current = false;
       }
     },
-    [displayMode, drawDetections, ensureModel, threshold, timing.frames],
+    [displayMode, drawDetections, ensureModel, threshold],
   );
 
   useEffect(() => {
