@@ -111,7 +111,7 @@ export default function App() {
   const [displayMode, setDisplayMode] = useState<DisplayMode>("all");
   const [selectedCamera, setSelectedCamera] = useState<FacingMode | null>(null);
   const [cameraAspect, setCameraAspect] = useState("16 / 9");
-  const [threshold, setThreshold] = useState(0.3);
+  const [threshold, setThreshold] = useState(0.6);
   const [running, setRunning] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
   const [modelState, setModelState] = useState<"loading" | "ready" | "error">("loading");
