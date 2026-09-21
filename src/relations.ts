@@ -42,6 +42,7 @@ const BANK_URL =
   "https://cdn.jsdelivr.net/gh/Maelic/RelateAnything@main/deploy/dist/relsgg-vits16plus/predicate_bank.npz";
 const MODEL_SIZE = 448;
 const MAX_BOXES = 32;
+const MAX_RELATION_OBJECTS = 8;
 const TEXT_DIM = 512;
 const CALIBRATION_A = 0.5651;
 const CALIBRATION_B = -1.9623;
@@ -340,7 +341,7 @@ export async function analyseRelationships(
 ) {
   const selectedDetections = [...detections]
     .sort((left, right) => right.confidence - left.confidence)
-    .slice(0, MAX_BOXES);
+    .slice(0, MAX_RELATION_OBJECTS);
 
   if (selectedDetections.length < 2) {
     return { relations: [] as SceneRelation[], inferenceMs: 0, usedDetections: selectedDetections };
