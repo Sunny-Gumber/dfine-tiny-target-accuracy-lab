@@ -36,6 +36,39 @@ export function intersectionOverUnion(a: TrackableDetection, b: TrackableDetecti
   return union > 0 ? intersection / union : 0;
 }
 
+function overlapOverSmallerArea(a: TrackableDetection, b: TrackableDetection) {
+  const x1 = Math.max(a.x1, b.x1);
+  const y1 = Math.max(a.y1, b.y1);
+  const x2 = Math.min(a.x2, b.x2);
+  const y2 = Math.min(a.y2, b.y2);
+  const intersection = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  if (!intersection) return 0;
+  const smaller = Math.min(area(a), area(b));
+  return smaller > 0 ? intersection / smaller : 0;
+}
+
+export function deduplicateDetections<T extends TrackableDetection>(
+  detections: T[],
+  iouThreshold = 0.45,
+  containmentThreshold = 0.72,
+) {
+  const kept: T[] = [];
+
+  for (const candidate of [...detections].sort((left, right) => right.confidence - left.confidence)) {
+    const duplicate = kept.some((existing) => {
+      if (existing.label !== candidate.label) return false;
+      return (
+        intersectionOverUnion(existing, candidate) >= iouThreshold ||
+        overlapOverSmallerArea(existing, candidate) >= containmentThreshold
+      );
+    });
+
+    if (!duplicate) kept.push(candidate);
+  }
+
+  return kept;
+}
+
 export class IoUTracker<T extends TrackableDetection> {
   private readonly iouThreshold: number;
   private readonly maxMisses: number;
