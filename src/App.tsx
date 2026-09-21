@@ -433,7 +433,7 @@ export default function App() {
           setAverageMs(mean);
           setAnalysedFrames((count) => count + 1);
 
-          if (liveSceneEnabled && allItems.length >= 2) {
+          if (liveSceneEnabled && allItems.length >= 2 && source instanceof HTMLVideoElement) {
             const now = performance.now();
             if (!relationBusyRef.current && now - lastRelationAtRef.current >= relationCadenceMs) {
               lastRelationAtRef.current = now;
