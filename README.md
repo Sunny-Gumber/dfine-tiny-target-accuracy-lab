@@ -61,7 +61,7 @@ Phase 2 deliberately does **not** run RelateAnything on every detector frame. Th
 
 Balanced is the default.
 
-The tracker is intentionally lightweight and browser-friendly. It matches detections by label and bounding-box IoU, gives them short-lived IDs, and lets relationship results remain attached to the same moving objects between relation passes.
+The tracker is intentionally lightweight and browser-friendly. Before tracking, a stronger duplicate-suppression pass removes same-label boxes that substantially overlap or contain one another. This prevents cases where one physical car is represented by two detector boxes and two track IDs.
 
 Example live output:
 
@@ -72,6 +72,8 @@ Example live output:
 ```
 
 A small temporal smoother keeps a relation for one missed relation pass and applies an exponential moving average to the relationship score. This reduces flicker without pretending to be a full multi-object-tracking or activity-recognition system.
+
+When **Live Scene AI** is enabled, the detector's yellow/blue boxes are hidden from the viewport. They remain available internally as coordinates, because RelateAnything needs boxes to define the object regions. RelateAnything still receives the clean camera pixels; no detector rectangles are painted into its input image.
 
 ## Scene-understanding scoring
 
@@ -147,7 +149,7 @@ The build runs the TypeScript check first and then creates the production bundle
 
 ## Implementation notes
 
-RelateAnything accepts image pixels and bounding boxes; object class labels are not required as model inputs. Up to 32 highest-confidence detections are used, matching the released relation graph's box capacity.
+RelateAnything accepts image pixels and bounding boxes; object class labels are not required as model inputs. The released graph still has a 32-box tensor capacity, but this mobile-oriented build intentionally supplies at most **8 high-confidence deduplicated objects** per relation pass. The remaining slots stay padded, while `box_counts` tells the graph how many real objects are present.
 
 The relation preprocessing follows the released deployment path:
 
@@ -158,7 +160,9 @@ The relation preprocessing follows the released deployment path:
 - calibrated relation scoring
 - top relations ranked using relation score plus detector confidence
 
-For live video, tracking is post-detection logic only. It does not change RelateAnything's visual inputs or inject object class labels into the relation model.
+For live video, tracking is post-detection logic only. It does not change RelateAnything's visual inputs or inject object class labels into the relation model. Live relation inference also ignores brand-new one-frame tracks until they have survived at least two detector passes.
+
+The current YOLOX-S graph remains at its native **640 × 640** inference input. Lowering the camera capture resolution alone would not change that neural-network input; a genuine 416 × 416 detector test requires a separately exported detector model, so this cleanup does not pretend to change the fixed graph size.
 
 ## Limits
 
