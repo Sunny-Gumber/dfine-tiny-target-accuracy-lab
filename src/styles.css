@@ -69,6 +69,12 @@ button.scene-action:hover {
   background: #3a291d;
 }
 
+button.scene-action.active-scene {
+  border-color: #22d49a;
+  background: #12352f;
+  color: #bff7df;
+}
+
 .page-shell {
   width: min(1080px, calc(100% - 32px));
   margin: 0 auto;
@@ -95,7 +101,7 @@ p {
 }
 
 h1 {
-  max-width: 820px;
+  max-width: 880px;
   margin-bottom: 12px;
   font-size: clamp(34px, 5vw, 58px);
   line-height: 1.03;
@@ -108,7 +114,7 @@ h2 {
 }
 
 .intro {
-  max-width: 820px;
+  max-width: 860px;
   color: #9bb0b7;
   font-size: 17px;
   line-height: 1.65;
@@ -394,6 +400,7 @@ h2 {
   color: #ffc6cc;
 }
 
+.cadence-block,
 .relation-threshold {
   display: flex;
   align-items: center;
@@ -406,16 +413,19 @@ h2 {
   background: #061920;
 }
 
+.cadence-block > div:first-child,
 .relation-threshold > div:first-child {
   min-width: 220px;
 }
 
+.cadence-block > div:first-child strong,
 .relation-threshold > div:first-child strong {
   display: block;
   color: #eaf7f8;
   font-size: 14px;
 }
 
+.cadence-block small,
 .relation-threshold small {
   display: block;
   max-width: 520px;
@@ -423,6 +433,19 @@ h2 {
   color: #708990;
   font-size: 12px;
   line-height: 1.5;
+}
+
+.cadence-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(105px, 1fr));
+  gap: 8px;
+  min-width: min(470px, 100%);
+}
+
+.cadence-grid button {
+  min-height: 42px;
+  padding: 8px 10px;
+  font-size: 12px;
 }
 
 .relation-list {
@@ -476,6 +499,32 @@ h2 {
   color: #789098;
   text-align: center;
   line-height: 1.55;
+}
+
+.phase-flow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid #1b3942;
+  border-radius: 14px;
+  background: #06171d;
+}
+
+.phase-flow span {
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: #0e2a32;
+  color: #b9d9dc;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.phase-flow i {
+  color: #5a747c;
+  font-style: normal;
 }
 
 .scene-note {
@@ -572,9 +621,15 @@ h2 {
     grid-template-columns: 1fr;
   }
 
+  .cadence-block,
   .relation-threshold {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .cadence-grid {
+    min-width: 0;
+    grid-template-columns: 1fr;
   }
 
   .slider-row.compact {
@@ -588,6 +643,10 @@ h2 {
 
   .relation-row {
     align-items: flex-start;
+  }
+
+  .phase-flow {
+    gap: 6px;
   }
 
   h1 {
