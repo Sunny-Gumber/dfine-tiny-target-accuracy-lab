@@ -1,10 +1,16 @@
 import { COCO_CLASSES, loadModel, type LIBREYOLO } from "libreyolo-web";
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  analyseRelationships,
+  type RelationLoadUpdate,
+  type SceneRelation,
+} from "./relations";
 
 type FacingMode = "environment" | "user";
 type SourceMode = "camera" | "image";
 type DisplayMode = "focus" | "all";
 type DetectionGroup = "Human" | "Vehicle" | "Other";
+type RelationState = "idle" | "loading" | "running" | "done" | "error";
 
 type Detection = {
   x1: number;
@@ -19,6 +25,7 @@ type Detection = {
 const MODEL_NAME = "LibreYOLOXs" as const;
 const MODEL_INPUT = 640;
 const DEFAULT_CONFIDENCE = 0.6;
+const DEFAULT_RELATION_THRESHOLD = 0.56;
 const CAMERA_WIDTH = 640;
 const CAMERA_HEIGHT = 360;
 const CAMERA_WARMUP_RUNS = 3;
@@ -65,6 +72,7 @@ export default function App() {
   const [selectedCamera, setSelectedCamera] = useState<FacingMode | null>(null);
   const [cameraAspect, setCameraAspect] = useState("16 / 9");
   const [threshold, setThreshold] = useState(DEFAULT_CONFIDENCE);
+  const [relationThreshold, setRelationThreshold] = useState(DEFAULT_RELATION_THRESHOLD);
   const [running, setRunning] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
   const [modelState, setModelState] = useState<"loading" | "ready" | "error">("loading");
@@ -78,6 +86,10 @@ export default function App() {
   const [error, setError] = useState("");
   const [imageUrl, setImageUrl] = useState("");
   const [sourceName, setSourceName] = useState("Choose a source to begin");
+  const [sceneRelations, setSceneRelations] = useState<SceneRelation[]>([]);
+  const [relationMs, setRelationMs] = useState(0);
+  const [relationState, setRelationState] = useState<RelationState>("idle");
+  const [relationStatus, setRelationStatus] = useState("Image mode only in Phase 1. The relation model loads on demand.");
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
@@ -96,11 +108,19 @@ export default function App() {
   const vehicles = useMemo(() => detections.filter((item) => item.group === "Vehicle").length, [detections]);
   const otherObjects = useMemo(() => detections.filter((item) => item.group === "Other").length, [detections]);
   const effectiveFps = averageMs ? 1000 / averageMs : 0;
+  const relationBusy = relationState === "loading" || relationState === "running";
 
   const clearOverlay = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     canvas.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height);
+  }, []);
+
+  const clearSceneResults = useCallback(() => {
+    setSceneRelations([]);
+    setRelationMs(0);
+    setRelationState("idle");
+    setRelationStatus("Image mode only in Phase 1. The relation model loads on demand.");
   }, []);
 
   const resetStats = useCallback(
@@ -112,9 +132,10 @@ export default function App() {
       setAverageMs(0);
       setAnalysedFrames(0);
       setDetections([]);
+      clearSceneResults();
       clearOverlay();
     },
-    [clearOverlay],
+    [clearOverlay, clearSceneResults],
   );
 
   const stopCamera = useCallback(() => {
@@ -221,13 +242,58 @@ export default function App() {
     }
   }, []);
 
+  const drawRelations = useCallback((relations: SceneRelation[], width: number, height: number) => {
+    const canvas = canvasRef.current;
+    if (!canvas || !width || !height) return;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+
+    context.save();
+    context.lineWidth = Math.max(2, width / 600);
+    context.font = `700 ${Math.max(11, Math.round(width / 100))}px Arial`;
+    context.textBaseline = "middle";
+
+    relations.slice(0, 6).forEach((relation) => {
+      const sx = (relation.subject.x1 + relation.subject.x2) / 2;
+      const sy = (relation.subject.y1 + relation.subject.y2) / 2;
+      const ox = (relation.object.x1 + relation.object.x2) / 2;
+      const oy = (relation.object.y1 + relation.object.y2) / 2;
+      const angle = Math.atan2(oy - sy, ox - sx);
+      const arrowSize = Math.max(8, width / 80);
+
+      context.strokeStyle = "#ffad66";
+      context.fillStyle = "#ffad66";
+      context.beginPath();
+      context.moveTo(sx, sy);
+      context.lineTo(ox, oy);
+      context.stroke();
+      context.beginPath();
+      context.moveTo(ox, oy);
+      context.lineTo(ox - arrowSize * Math.cos(angle - Math.PI / 6), oy - arrowSize * Math.sin(angle - Math.PI / 6));
+      context.lineTo(ox - arrowSize * Math.cos(angle + Math.PI / 6), oy - arrowSize * Math.sin(angle + Math.PI / 6));
+      context.closePath();
+      context.fill();
+
+      const text = `${relation.predicate} ${Math.round(relation.score * 100)}%`;
+      const textWidth = context.measureText(text).width + 10;
+      const tx = Math.min(Math.max(2, (sx + ox) / 2 - textWidth / 2), Math.max(2, width - textWidth - 2));
+      const ty = Math.min(Math.max(12, (sy + oy) / 2), height - 12);
+      context.fillStyle = "rgba(4, 19, 25, 0.88)";
+      context.fillRect(tx, ty - 11, textWidth, 22);
+      context.fillStyle = "#ffd2ad";
+      context.fillText(text, tx + 5, ty);
+    });
+
+    context.restore();
+  }, []);
+
   const analyseSource = useCallback(
-    async (source: HTMLVideoElement | HTMLImageElement, live: boolean) => {
-      if (busyRef.current) return;
+    async (source: HTMLVideoElement | HTMLImageElement, live: boolean): Promise<Detection[]> => {
+      if (busyRef.current) return [];
 
       const width = source instanceof HTMLVideoElement ? source.videoWidth : source.naturalWidth;
       const height = source instanceof HTMLVideoElement ? source.videoHeight : source.naturalHeight;
-      if (!width || !height) return;
+      if (!width || !height) return [];
 
       busyRef.current = true;
 
@@ -241,10 +307,10 @@ export default function App() {
         });
         const elapsed = performance.now() - started;
 
-        const items = result.detections
+        const allItems = result.detections
           .map((item): Detection | null => {
             if (item.confidence < threshold) return null;
-            const mapped = mapDetection(item.classId, displayMode);
+            const mapped = mapDetection(item.classId, "all");
             if (!mapped) return null;
 
             return {
@@ -258,15 +324,16 @@ export default function App() {
             };
           })
           .filter((item): item is Detection => item !== null);
+        const visibleItems = displayMode === "all" ? allItems : allItems.filter((item) => item.group !== "Other");
 
-        setDetections(items);
+        setDetections(visibleItems);
         setProvider(model.provider || "wasm");
-        drawDetections(items, width, height);
+        drawDetections(visibleItems, width, height);
 
         if (live && warmupRef.current > 0) {
           warmupRef.current -= 1;
           setWarmupRemaining(warmupRef.current);
-          return;
+          return allItems;
         }
 
         if (live) {
@@ -281,9 +348,12 @@ export default function App() {
           setAverageMs(elapsed);
           setAnalysedFrames(1);
         }
+
+        return allItems;
       } catch (caught) {
         setRunning(false);
         setError(caught instanceof Error ? caught.message : "Inference failed.");
+        return [];
       } finally {
         busyRef.current = false;
       }
@@ -418,6 +488,46 @@ export default function App() {
     await analyseSource(imageRef.current, false);
   }, [analyseSource, imageUrl, resetStats]);
 
+  const analyseScene = useCallback(async () => {
+    const image = imageRef.current;
+    if (!image || !imageUrl || relationBusy) return;
+
+    resetStats(0);
+    setRelationState("loading");
+    setRelationStatus("Running YOLOX-S first so RelateAnything receives real detected boxes…");
+    setError("");
+
+    const allItems = await analyseSource(image, false);
+    if (allItems.length < 2) {
+      setRelationState("done");
+      setRelationStatus("Scene understanding needs at least two detected objects. Try a lower detection confidence.");
+      return;
+    }
+
+    const handleUpdate = (update: RelationLoadUpdate) => {
+      setRelationState(update.stage === "inference" ? "running" : "loading");
+      setRelationStatus(update.message);
+    };
+
+    try {
+      const result = await analyseRelationships(image, allItems, relationThreshold, handleUpdate);
+      setSceneRelations(result.relations);
+      setRelationMs(result.inferenceMs);
+      setRelationState("done");
+      setRelationStatus(
+        result.relations.length
+          ? `Found ${result.relations.length} ranked relationship${result.relations.length === 1 ? "" : "s"}.`
+          : "No relationship crossed the current threshold. Try lowering the relationship confidence.",
+      );
+      drawRelations(result.relations, image.naturalWidth, image.naturalHeight);
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "Scene-understanding inference failed.";
+      setRelationState("error");
+      setRelationStatus(message);
+      setError(`RelateAnything: ${message}`);
+    }
+  }, [analyseSource, drawRelations, imageUrl, relationBusy, relationThreshold, resetStats]);
+
   const changeDisplayMode = useCallback(
     (mode: DisplayMode) => {
       setDisplayMode(mode);
@@ -426,37 +536,63 @@ export default function App() {
     [resetStats],
   );
 
+  const changeDetectionThreshold = useCallback(
+    (value: number) => {
+      setThreshold(value);
+      setSceneRelations([]);
+      setRelationMs(0);
+      if (sourceMode === "image") {
+        setRelationState("idle");
+        setRelationStatus("Detection confidence changed. Run scene understanding again for fresh relationships.");
+      }
+    },
+    [sourceMode],
+  );
+
+  const changeRelationThreshold = useCallback((value: number) => {
+    setRelationThreshold(value);
+    setSceneRelations([]);
+    setRelationMs(0);
+    setRelationState("idle");
+    setRelationStatus("Relationship confidence changed. Run scene understanding again to apply it.");
+  }, []);
+
   return (
     <main className="page-shell">
       <header className="hero">
-        <p className="eyebrow">Browser computer vision demo</p>
-        <h1>COCO Object Detection</h1>
+        <p className="eyebrow">CCTV AI browser lab</p>
+        <h1>Object Detection + Scene Understanding</h1>
         <p className="intro">
-          YOLOX-S runs locally in the browser with a 640 × 640 model input. All 80 COCO classes are shown by
-          default, with an optional Human + Vehicle view for CCTV-focused testing.
+          YOLOX-S detects objects locally in the browser. Phase 1 now feeds those detected boxes into RelateAnything
+          to infer visual relationships such as wearing, riding, holding, carrying, beside, and behind on uploaded images.
         </p>
         <div className="badges">
           <span>YOLOX-S · {MODEL_INPUT}px</span>
           <span>{provider.toUpperCase()}</span>
-          <span>{displayMode === "focus" ? "Human + Vehicle" : "All COCO · 80 classes"}</span>
+          <span>RelateAnything · Phase 1</span>
+          <span>{displayMode === "focus" ? "Human + Vehicle view" : "All COCO · 80 classes"}</span>
         </div>
       </header>
 
       <section className="panel viewport-panel">
         <div className="panel-head">
           <div>
-            <h2>Detection viewport</h2>
+            <h2>AI viewport</h2>
             <p>{sourceName}</p>
           </div>
-          <div className={`live-state ${running ? "active" : ""}`}>
+          <div className={`live-state ${running || relationBusy ? "active" : ""}`}>
             <i />
-            {modelState === "loading"
-              ? `Loading model ${modelProgress}%`
-              : running
-                ? "Analysing"
-                : sourceMode === "image" && imageUrl
-                  ? "Image ready"
-                  : "Ready"}
+            {sourceMode === "image" && relationBusy
+              ? relationState === "running"
+                ? "Understanding scene"
+                : "Loading relation AI"
+              : modelState === "loading"
+                ? `Loading detector ${modelProgress}%`
+                : running
+                  ? "Detecting"
+                  : sourceMode === "image" && imageUrl
+                    ? "Image ready"
+                    : "Ready"}
           </div>
         </div>
 
@@ -469,7 +605,7 @@ export default function App() {
             </div>
           ) : imageUrl ? (
             <div className="media-layer image-layer">
-              <img ref={imageRef} src={imageUrl} alt="Selected for detection" className="media" />
+              <img ref={imageRef} src={imageUrl} alt="Selected for AI analysis" className="media" />
               <canvas ref={canvasRef} className="overlay" />
             </div>
           ) : (
@@ -483,7 +619,11 @@ export default function App() {
           <Metric label="Vehicles" value={vehicles} />
           {displayMode === "all" ? <Metric label="Other objects" value={otherObjects} /> : null}
           {sourceMode === "image" ? (
-            <Metric label="Analysis time" value={formatMs(currentMs)} />
+            <>
+              <Metric label="Detection time" value={formatMs(currentMs)} />
+              <Metric label="Relationships" value={sceneRelations.length || "—"} />
+              <Metric label="Relation time" value={formatMs(relationMs)} />
+            </>
           ) : (
             <>
               <Metric label="Current" value={formatMs(currentMs)} />
@@ -503,7 +643,7 @@ export default function App() {
           <span>1</span>
           <div>
             <h2>Choose source</h2>
-            <p>Use a phone camera, webcam, or an uploaded image.</p>
+            <p>Object detection works with camera or image. Phase 1 scene understanding is intentionally image-only.</p>
           </div>
         </div>
 
@@ -525,16 +665,26 @@ export default function App() {
             <input type="file" accept="image/*" onChange={handleImage} />
           </label>
           {sourceMode === "image" ? (
-            <button onClick={() => void analyseImage()} disabled={!imageUrl || modelState !== "ready"}>
-              Analyse image
+            <button onClick={() => void analyseImage()} disabled={!imageUrl || modelState !== "ready" || relationBusy}>
+              Detect objects
             </button>
           ) : cameraActive ? (
             <button onClick={() => setRunning((value) => !value)}>{running ? "Pause AI" : "Resume AI"}</button>
           ) : null}
+          {sourceMode === "image" ? (
+            <button
+              className="scene-action"
+              onClick={() => void analyseScene()}
+              disabled={!imageUrl || modelState !== "ready" || relationBusy}
+            >
+              {relationBusy ? "Working…" : "Understand scene · Phase 1"}
+            </button>
+          ) : null}
         </div>
 
         <p className="source-note">
-          The visible preview keeps the source aspect ratio. YOLOX-S runs internally at 640 × 640.
+          Media stays in your browser. Scene understanding downloads the released RelateAnything model on the first run,
+          then inference also runs locally in the browser.
         </p>
       </section>
 
@@ -543,7 +693,7 @@ export default function App() {
           <span>2</span>
           <div>
             <h2>Detection set</h2>
-            <p>YOLOX-S is the only model. This control only changes which detections are displayed.</p>
+            <p>The view can focus on humans and road vehicles. Scene understanding still uses all detected COCO objects.</p>
           </div>
         </div>
         <div className="source-grid">
@@ -557,7 +707,7 @@ export default function App() {
             className={displayMode === "focus" ? "primary" : undefined}
             onClick={() => changeDisplayMode("focus")}
           >
-            Human + Vehicle
+            Human + Vehicle view
           </button>
         </div>
       </section>
@@ -567,7 +717,7 @@ export default function App() {
           <span>3</span>
           <div>
             <h2>Detection confidence</h2>
-            <p>Default is 60%. Lower values find more candidates but may also add false detections.</p>
+            <p>Default is 60%. Lower values find more candidate objects but may also add false detections.</p>
           </div>
         </div>
         <div className="slider-row">
@@ -577,26 +727,86 @@ export default function App() {
             max="80"
             step="1"
             value={Math.round(threshold * 100)}
-            onChange={(event) => setThreshold(Number(event.target.value) / 100)}
+            onChange={(event) => changeDetectionThreshold(Number(event.target.value) / 100)}
           />
           <strong>{Math.round(threshold * 100)}%</strong>
         </div>
+      </section>
+
+      <section className="panel controls scene-panel">
+        <div className="section-title">
+          <span>4</span>
+          <div>
+            <h2>Scene understanding · Phase 1</h2>
+            <p>YOLOX-S boxes → RelateAnything ViT-S+ → ranked CCTV-oriented relationships.</p>
+          </div>
+        </div>
+
+        <div className={`scene-status ${relationBusy ? "active" : relationState === "error" ? "error" : ""}`}>
+          <strong>{relationBusy ? "Working" : relationState === "done" ? "Result" : relationState === "error" ? "Error" : "Ready"}</strong>
+          <span>{sourceMode === "camera" ? "Upload an image to use Phase 1 scene understanding." : relationStatus}</span>
+        </div>
+
+        <div className="relation-threshold">
+          <div>
+            <strong>Relationship confidence</strong>
+            <small>Released calibrated score. Lower values show more relationships but can become noisy.</small>
+          </div>
+          <div className="slider-row compact">
+            <input
+              type="range"
+              min="30"
+              max="90"
+              step="1"
+              value={Math.round(relationThreshold * 100)}
+              onChange={(event) => changeRelationThreshold(Number(event.target.value) / 100)}
+            />
+            <strong>{Math.round(relationThreshold * 100)}%</strong>
+          </div>
+        </div>
+
+        {sceneRelations.length ? (
+          <div className="relation-list">
+            {sceneRelations.map((relation, index) => (
+              <div className="relation-row" key={`${relation.subject.label}-${relation.predicate}-${relation.object.label}-${index}`}>
+                <div className="relation-chain">
+                  <strong>{relation.subject.label}</strong>
+                  <span>→ {relation.predicate} →</span>
+                  <strong>{relation.object.label}</strong>
+                </div>
+                <span className="relation-score">{Math.round(relation.score * 100)}%</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-relations">
+            {sourceMode === "image" && imageUrl
+              ? "Press “Understand scene · Phase 1” to detect objects and infer relationships."
+              : "Upload an image to begin."}
+          </div>
+        )}
+
+        <p className="scene-note">
+          Phase 1 uses a compact released vocabulary including wearing, riding, holding, carrying, sitting on, using,
+          attached to, beside, in front of, behind, above, and below. Object labels are used for display only; the relation
+          model receives pixels plus bounding boxes.
+        </p>
       </section>
 
       {error ? <div className="error-box">{error}</div> : null}
 
       <footer className="footer-card">
         <div>
-          <strong>YOLOX-S</strong>
-          <p>One accuracy-focused model running at its native 640 × 640 input.</p>
+          <strong>YOLOX-S detector</strong>
+          <p>Runs at its native 640 × 640 input with WebGPU preferred and WASM fallback.</p>
         </div>
         <div>
-          <strong>WebGPU first</strong>
-          <p>WebGPU is preferred when available, with WASM as the fallback runtime.</p>
+          <strong>RelateAnything</strong>
+          <p>Phase 1 runs the released relation model through ONNX Runtime Web/WASM for uploaded images.</p>
         </div>
         <div>
           <strong>Local media</strong>
-          <p>Camera frames and uploaded images stay in the browser during inference.</p>
+          <p>Camera frames and uploaded images are analysed in-browser; the image is not uploaded to an inference API.</p>
         </div>
       </footer>
 
