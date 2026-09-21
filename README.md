@@ -1,21 +1,59 @@
-# YOLOX-S Browser Object Detection
+# CCTV AI Vision Lab — YOLOX-S + RelateAnything
 
-A small browser-based object detection demo using **YOLOX-S** and the **COCO 80-class dataset**.
+A browser-based CCTV computer-vision lab using **YOLOX-S** for object detection and **RelateAnything** for Phase 1 scene understanding.
 
 **Live demo:** https://sunny-gumber.github.io/dfine-tiny-target-accuracy-lab/
 
-The project is intentionally simple: choose a camera or upload an image, run inference locally in the browser, and draw detections over the source.
+## What works
 
-## Features
+### Object detection
 
 - YOLOX-S at its native **640 × 640** model input
 - All **80 COCO classes** enabled by default
-- Default confidence threshold: **60%**
-- Optional Human + Vehicle display filter for CCTV-focused tests
+- Optional Human + Vehicle display filter
 - Back camera, front camera/webcam, and image upload
 - WebGPU when available, with WASM fallback
-- Live inference timing and rolling inference-rate estimate
-- Camera frames and uploaded images stay in the browser during inference
+- Detection timing and rolling inference-rate estimate
+
+### Phase 1 — scene understanding
+
+For an uploaded image the app now runs this pipeline:
+
+```text
+Image
+  ↓
+YOLOX-S
+  ↓
+Detected bounding boxes
+  ↓
+RelateAnything ViT-S+
+  ↓
+Ranked visual relationships
+```
+
+The first Phase 1 implementation is deliberately **image-only**. It feeds the actual YOLOX-S boxes into the released RelateAnything ONNX graph and shows relationships such as:
+
+- wearing
+- riding
+- holding
+- carrying
+- sitting on
+- using
+- attached to
+- beside
+- in front of
+- behind
+- above / below
+
+The relation score threshold is adjustable in the UI. The default is **56%**, matching the released calibrated operating-point guidance rather than applying a detector confidence to relation scores.
+
+## Privacy and model loading
+
+Camera frames and uploaded images are processed in the browser and are not sent to an inference API.
+
+YOLOX-S and RelateAnything model assets still have to be downloaded by the browser. RelateAnything is loaded only when **Understand scene · Phase 1** is pressed, because the released ONNX model is substantially larger than the detector. The relation runtime uses WASM in Phase 1 for compatibility with the released ONNX graph.
+
+The predicate bank is loaded from the upstream RelateAnything release and only a compact CCTV-oriented subset is supplied to the relation graph.
 
 ## Tech stack
 
@@ -24,6 +62,8 @@ The project is intentionally simple: choose a camera or upload an image, run inf
 - Vite
 - LibreYOLO Web
 - ONNX Runtime Web
+- YOLOX-S
+- RelateAnything ViT-S+
 
 ## Run locally
 
@@ -36,28 +76,27 @@ npm run dev
 
 Open the Vite development URL in your browser. Camera access requires localhost or HTTPS.
 
-Use `npm install` when intentionally changing dependencies so the lock file is updated with `package.json`.
-
 ## Build
 
 ```bash
 npm run build
 ```
 
-The build command runs the TypeScript check first and then creates the production bundle in `dist/`.
+The build runs the TypeScript check first and then creates the production bundle in `dist/`.
 
 ## Project structure
 
 ```text
 .
 ├── .github/workflows/
-│   ├── ci.yml                    # pull-request build check
-│   └── pages.yml                 # GitHub Pages deployment
+│   ├── ci.yml
+│   └── pages.yml
 ├── src/
-│   ├── App.tsx                   # camera, inference and UI logic
-│   ├── coco.ts                   # COCO labels used by the UI
-│   ├── main.tsx                  # React entry point
-│   └── styles.css                # application styles
+│   ├── App.tsx          # UI, detector flow and Phase 1 orchestration
+│   ├── relations.ts     # RelateAnything browser runtime + relation decode
+│   ├── main.tsx
+│   ├── runtime.ts       # ONNX Runtime configuration
+│   └── styles.css
 ├── index.html
 ├── package.json
 ├── package-lock.json
@@ -65,26 +104,30 @@ The build command runs the TypeScript check first and then creates the productio
 └── vite.config.ts
 ```
 
-## Detection modes
+## Phase 1 implementation notes
 
-**All COCO objects** is the default mode. Labels use the standard COCO class names.
+RelateAnything accepts image pixels and bounding boxes; object class labels are not required as model inputs. The app keeps the YOLOX-S detector and passes its boxes to the relation head. Up to 32 highest-confidence detections are used, matching the released relation graph's box capacity.
 
-**Human + Vehicle** is only a display filter. It keeps `person` as Human and groups bicycle, car, motorcycle, bus, and truck as Vehicle. The underlying YOLOX-S inference pass is unchanged.
+The relation preprocessing follows the released deployment path:
 
-## Runtime notes
+- source image resized directly to **448 × 448** RGB
+- source boxes normalized and converted from XYXY to CXCYWH
+- boxes padded to the graph's fixed capacity
+- runtime-supplied predicate embeddings (`W`) and routing weights (`alpha`)
+- calibrated score: `sigmoid(a × (predicate_logit + pair_logit) + b)`
 
-The application UI and the inference runtime are split into separate JavaScript chunks. This lets the page render before the heavier LibreYOLO/ONNX Runtime code is loaded.
+Phase 1 uses the released calibration values for `relsgg-vits16plus` and ranks surviving relationships with detector confidence after thresholding, matching the upstream deployment convention.
 
-YOLOX-S is heavier than YOLOX Nano, so browser speed depends strongly on the device and execution provider. The displayed FPS value is an inference-rate estimate calculated from measured model latency; it is not the camera capture frame rate.
+## Scope and next phases
 
-For camera input the browser requests a 640 × 360 stream, while the model preprocessor converts the frame to the model's 640 × 640 input. Uploaded images are analysed as complete frames.
+This is an engineering/demo project, not a production surveillance system. Detection and relation quality vary with target size, lighting, occlusion, camera angle, motion blur, and device performance.
 
-## Scope
+Phase 2 can add live-video relation inference at a reduced cadence plus tracking. Phase 3 can add a CCTV event/rule engine for temporal events such as abandoned objects, PPE logic, and other multi-frame behaviours.
 
-This is an engineering/demo project, not a production surveillance system. Detection quality varies with target size, lighting, occlusion, camera angle, motion blur, browser support, and device performance.
+## Upstream credits and licenses
 
-The model and browser inference runtime are downloaded on first use, so the first visit can take longer than later visits when browser caching is available.
+- Browser object detection: [LibreYOLO Web](https://github.com/LibreYOLO/libreyolo-web)
+- Relation prediction: [Maelic/RelateAnything](https://github.com/Maelic/RelateAnything)
+- RelateAnything code is Apache-2.0; released weights are a DINOv3 derivative and follow the DINOv3 license described by the upstream project.
 
-## Acknowledgements
-
-Browser inference is provided by [LibreYOLO Web](https://github.com/LibreYOLO/libreyolo-web), which uses ONNX Runtime Web for WebGPU/WASM execution.
+See each upstream project for its complete license and third-party notices.
