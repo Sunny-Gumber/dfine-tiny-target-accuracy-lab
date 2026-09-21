@@ -5,6 +5,12 @@ import {
   type RelationLoadUpdate,
   type SceneRelation,
 } from "./relations";
+import {
+  IoUTracker,
+  RelationSmoother,
+  resolveRelationBoxes,
+  type TrackedDetection,
+} from "./tracking";
 
 type FacingMode = "environment" | "user";
 type SourceMode = "camera" | "image";
@@ -20,12 +26,15 @@ type Detection = {
   confidence: number;
   label: string;
   group: DetectionGroup;
+  trackId?: number;
+  trackAge?: number;
 };
 
 const MODEL_NAME = "LibreYOLOXs" as const;
 const MODEL_INPUT = 640;
 const DEFAULT_CONFIDENCE = 0.6;
 const DEFAULT_RELATION_THRESHOLD = 0.56;
+const DEFAULT_RELATION_CADENCE_MS = 1500;
 const CAMERA_WIDTH = 640;
 const CAMERA_HEIGHT = 360;
 const CAMERA_WARMUP_RUNS = 3;
@@ -36,15 +45,8 @@ function titleCase(value: string) {
   return value.replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function mapDetection(classId: number, mode: DisplayMode): { label: string; group: DetectionGroup } | null {
+function mapDetection(classId: number): { label: string; group: DetectionGroup } | null {
   if (classId < 0 || classId >= COCO_CLASSES.length) return null;
-
-  if (mode === "focus") {
-    if (classId === 0) return { label: "Human", group: "Human" };
-    if (ROAD_VEHICLE_CLASSES.has(classId)) return { label: "Vehicle", group: "Vehicle" };
-    return null;
-  }
-
   return {
     label: titleCase(COCO_CLASSES[classId]),
     group: classId === 0 ? "Human" : ROAD_VEHICLE_CLASSES.has(classId) ? "Vehicle" : "Other",
@@ -54,6 +56,10 @@ function mapDetection(classId: number, mode: DisplayMode): { label: string; grou
 function formatMs(value: number) {
   if (!value || !Number.isFinite(value)) return "—";
   return value < 10 ? `${value.toFixed(1)} ms` : `${Math.round(value)} ms`;
+}
+
+function relationObjectName(item: SceneRelation["subject"]) {
+  return item.trackId === undefined ? item.label : `#${item.trackId} ${item.label}`;
 }
 
 function Metric({ label, value, note }: { label: string; value: string | number; note?: string }) {
@@ -73,8 +79,10 @@ export default function App() {
   const [cameraAspect, setCameraAspect] = useState("16 / 9");
   const [threshold, setThreshold] = useState(DEFAULT_CONFIDENCE);
   const [relationThreshold, setRelationThreshold] = useState(DEFAULT_RELATION_THRESHOLD);
+  const [relationCadenceMs, setRelationCadenceMs] = useState(DEFAULT_RELATION_CADENCE_MS);
   const [running, setRunning] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
+  const [liveSceneEnabled, setLiveSceneEnabled] = useState(false);
   const [modelState, setModelState] = useState<"loading" | "ready" | "error">("loading");
   const [modelProgress, setModelProgress] = useState(0);
   const [provider, setProvider] = useState("waiting");
@@ -89,7 +97,11 @@ export default function App() {
   const [sceneRelations, setSceneRelations] = useState<SceneRelation[]>([]);
   const [relationMs, setRelationMs] = useState(0);
   const [relationState, setRelationState] = useState<RelationState>("idle");
-  const [relationStatus, setRelationStatus] = useState("Image mode only in Phase 1. The relation model loads on demand.");
+  const [relationStatus, setRelationStatus] = useState(
+    "Phase 2 is ready: upload an image or enable Live Scene AI on a camera.",
+  );
+  const [relationUpdates, setRelationUpdates] = useState(0);
+  const [activeTrackCount, setActiveTrackCount] = useState(0);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
@@ -99,10 +111,16 @@ export default function App() {
   const streamRef = useRef<MediaStream | null>(null);
   const objectUrlRef = useRef("");
   const busyRef = useRef(false);
+  const relationBusyRef = useRef(false);
   const loopRef = useRef<number | null>(null);
   const lastStartRef = useRef(0);
+  const lastRelationAtRef = useRef(0);
   const timingRef = useRef<number[]>([]);
   const warmupRef = useRef(CAMERA_WARMUP_RUNS);
+  const generationRef = useRef(0);
+  const trackerRef = useRef(new IoUTracker<Detection>({ iouThreshold: 0.28, maxMisses: 8 }));
+  const smootherRef = useRef(new RelationSmoother({ emaWeight: 0.62, maxMisses: 1, maxRelations: 8 }));
+  const currentRelationsRef = useRef<SceneRelation[]>([]);
 
   const humans = useMemo(() => detections.filter((item) => item.group === "Human").length, [detections]);
   const vehicles = useMemo(() => detections.filter((item) => item.group === "Vehicle").length, [detections]);
@@ -116,15 +134,110 @@ export default function App() {
     canvas.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height);
   }, []);
 
-  const clearSceneResults = useCallback(() => {
+  const drawFrame = useCallback(
+    (items: Detection[], relations: SceneRelation[], width: number, height: number) => {
+      const canvas = canvasRef.current;
+      if (!canvas || !width || !height) return;
+
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+
+      const context = canvas.getContext("2d");
+      if (!context) return;
+
+      context.clearRect(0, 0, width, height);
+      context.lineWidth = Math.max(2, width / 520);
+      context.font = `700 ${Math.max(12, Math.round(width / 90))}px Arial`;
+      context.textBaseline = "top";
+
+      for (const item of items) {
+        const color = item.group === "Human" ? "#58e2d3" : item.group === "Vehicle" ? "#f4cf52" : "#79bdf2";
+        const x = Math.max(0, item.x1);
+        const y = Math.max(0, item.y1);
+        const boxWidth = Math.max(1, item.x2 - item.x1);
+        const boxHeight = Math.max(1, item.y2 - item.y1);
+        const trackPrefix = item.trackId === undefined ? "" : `#${item.trackId} `;
+        const label = `${trackPrefix}${item.label} ${Math.round(item.confidence * 100)}%`;
+        const labelHeight = Math.max(19, width / 60);
+        const labelWidth = context.measureText(label).width + 10;
+        const labelY = Math.max(0, y - labelHeight);
+
+        context.strokeStyle = color;
+        context.fillStyle = `${color}12`;
+        context.strokeRect(x, y, boxWidth, boxHeight);
+        context.fillRect(x, y, boxWidth, boxHeight);
+        context.fillStyle = color;
+        context.fillRect(x, labelY, labelWidth, labelHeight);
+        context.fillStyle = "#04151b";
+        context.fillText(label, x + 5, labelY + 3);
+      }
+
+      context.save();
+      context.lineWidth = Math.max(2, width / 600);
+      context.font = `700 ${Math.max(11, Math.round(width / 100))}px Arial`;
+      context.textBaseline = "middle";
+
+      relations.slice(0, 6).forEach((relation) => {
+        const sx = (relation.subject.x1 + relation.subject.x2) / 2;
+        const sy = (relation.subject.y1 + relation.subject.y2) / 2;
+        const ox = (relation.object.x1 + relation.object.x2) / 2;
+        const oy = (relation.object.y1 + relation.object.y2) / 2;
+        const angle = Math.atan2(oy - sy, ox - sx);
+        const arrowSize = Math.max(8, width / 80);
+
+        context.strokeStyle = "#ffad66";
+        context.fillStyle = "#ffad66";
+        context.beginPath();
+        context.moveTo(sx, sy);
+        context.lineTo(ox, oy);
+        context.stroke();
+        context.beginPath();
+        context.moveTo(ox, oy);
+        context.lineTo(ox - arrowSize * Math.cos(angle - Math.PI / 6), oy - arrowSize * Math.sin(angle - Math.PI / 6));
+        context.lineTo(ox - arrowSize * Math.cos(angle + Math.PI / 6), oy - arrowSize * Math.sin(angle + Math.PI / 6));
+        context.closePath();
+        context.fill();
+
+        const text = `${relation.predicate} ${Math.round(relation.score * 100)}%`;
+        const textWidth = context.measureText(text).width + 10;
+        const tx = Math.min(Math.max(2, (sx + ox) / 2 - textWidth / 2), Math.max(2, width - textWidth - 2));
+        const ty = Math.min(Math.max(12, (sy + oy) / 2), height - 12);
+        context.fillStyle = "rgba(4, 19, 25, 0.9)";
+        context.fillRect(tx, ty - 11, textWidth, 22);
+        context.fillStyle = "#ffd2ad";
+        context.fillText(text, tx + 5, ty);
+      });
+
+      context.restore();
+    },
+    [],
+  );
+
+  const clearSceneResults = useCallback((message?: string) => {
+    smootherRef.current.reset();
+    currentRelationsRef.current = [];
     setSceneRelations([]);
     setRelationMs(0);
+    setRelationUpdates(0);
     setRelationState("idle");
-    setRelationStatus("Image mode only in Phase 1. The relation model loads on demand.");
+    setRelationStatus(message ?? "Phase 2 is ready: upload an image or enable Live Scene AI on a camera.");
+  }, []);
+
+  const resetTracking = useCallback(() => {
+    trackerRef.current.reset();
+    smootherRef.current.reset();
+    currentRelationsRef.current = [];
+    lastRelationAtRef.current = 0;
+    setActiveTrackCount(0);
+    setSceneRelations([]);
+    setRelationUpdates(0);
   }, []);
 
   const resetStats = useCallback(
     (warmups = 0) => {
+      generationRef.current += 1;
       timingRef.current = [];
       warmupRef.current = warmups;
       setWarmupRemaining(warmups);
@@ -132,10 +245,12 @@ export default function App() {
       setAverageMs(0);
       setAnalysedFrames(0);
       setDetections([]);
+      setRelationMs(0);
+      resetTracking();
       clearSceneResults();
       clearOverlay();
     },
-    [clearOverlay, clearSceneResults],
+    [clearOverlay, clearSceneResults, resetTracking],
   );
 
   const stopCamera = useCallback(() => {
@@ -144,6 +259,7 @@ export default function App() {
     if (videoRef.current) videoRef.current.srcObject = null;
     setCameraActive(false);
     setRunning(false);
+    setLiveSceneEnabled(false);
   }, []);
 
   const syncCameraAspect = useCallback(() => {
@@ -196,6 +312,7 @@ export default function App() {
 
   useEffect(() => {
     return () => {
+      generationRef.current += 1;
       if (loopRef.current !== null) cancelAnimationFrame(loopRef.current);
       streamRef.current?.getTracks().forEach((track) => track.stop());
       if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
@@ -203,89 +320,56 @@ export default function App() {
     };
   }, []);
 
-  const drawDetections = useCallback((items: Detection[], width: number, height: number) => {
-    const canvas = canvasRef.current;
-    if (!canvas || !width || !height) return;
+  const runLiveRelations = useCallback(
+    async (source: HTMLVideoElement, trackedItems: TrackedDetection<Detection>[]) => {
+      if (!liveSceneEnabled || relationBusyRef.current || trackedItems.length < 2) return;
 
-    if (canvas.width !== width || canvas.height !== height) {
-      canvas.width = width;
-      canvas.height = height;
-    }
+      const generation = generationRef.current;
+      relationBusyRef.current = true;
+      setRelationState("loading");
+      setRelationStatus("Live Scene AI is preparing the relationship model…");
 
-    const context = canvas.getContext("2d");
-    if (!context) return;
+      const handleUpdate = (update: RelationLoadUpdate) => {
+        if (generation !== generationRef.current) return;
+        setRelationState(update.stage === "inference" ? "running" : "loading");
+        setRelationStatus(
+          update.stage === "inference"
+            ? "Analysing the latest tracked camera frame…"
+            : update.message,
+        );
+      };
 
-    context.clearRect(0, 0, width, height);
-    context.lineWidth = Math.max(2, width / 520);
-    context.font = `700 ${Math.max(12, Math.round(width / 90))}px Arial`;
-    context.textBaseline = "top";
+      try {
+        const result = await analyseRelationships(source, trackedItems, relationThreshold, handleUpdate);
+        if (generation !== generationRef.current) return;
 
-    for (const item of items) {
-      const color = item.group === "Human" ? "#58e2d3" : item.group === "Vehicle" ? "#f4cf52" : "#79bdf2";
-      const x = Math.max(0, item.x1);
-      const y = Math.max(0, item.y1);
-      const boxWidth = Math.max(1, item.x2 - item.x1);
-      const boxHeight = Math.max(1, item.y2 - item.y1);
-      const label = `${item.label} ${Math.round(item.confidence * 100)}%`;
-      const labelHeight = Math.max(19, width / 60);
-      const labelWidth = context.measureText(label).width + 10;
-      const labelY = Math.max(0, y - labelHeight);
+        const stable = smootherRef.current.update(result.relations);
+        currentRelationsRef.current = stable;
+        setSceneRelations(stable);
+        setRelationMs(result.inferenceMs);
+        setRelationUpdates((count) => count + 1);
+        setRelationState("done");
+        setRelationStatus(
+          stable.length
+            ? `Live Scene AI active · ${stable.length} stable relationship${stable.length === 1 ? "" : "s"}.`
+            : "Live Scene AI active · no relationship crossed the current threshold.",
+        );
 
-      context.strokeStyle = color;
-      context.fillStyle = `${color}12`;
-      context.strokeRect(x, y, boxWidth, boxHeight);
-      context.fillRect(x, y, boxWidth, boxHeight);
-      context.fillStyle = color;
-      context.fillRect(x, labelY, labelWidth, labelHeight);
-      context.fillStyle = "#04151b";
-      context.fillText(label, x + 5, labelY + 3);
-    }
-  }, []);
-
-  const drawRelations = useCallback((relations: SceneRelation[], width: number, height: number) => {
-    const canvas = canvasRef.current;
-    if (!canvas || !width || !height) return;
-    const context = canvas.getContext("2d");
-    if (!context) return;
-
-    context.save();
-    context.lineWidth = Math.max(2, width / 600);
-    context.font = `700 ${Math.max(11, Math.round(width / 100))}px Arial`;
-    context.textBaseline = "middle";
-
-    relations.slice(0, 6).forEach((relation) => {
-      const sx = (relation.subject.x1 + relation.subject.x2) / 2;
-      const sy = (relation.subject.y1 + relation.subject.y2) / 2;
-      const ox = (relation.object.x1 + relation.object.x2) / 2;
-      const oy = (relation.object.y1 + relation.object.y2) / 2;
-      const angle = Math.atan2(oy - sy, ox - sx);
-      const arrowSize = Math.max(8, width / 80);
-
-      context.strokeStyle = "#ffad66";
-      context.fillStyle = "#ffad66";
-      context.beginPath();
-      context.moveTo(sx, sy);
-      context.lineTo(ox, oy);
-      context.stroke();
-      context.beginPath();
-      context.moveTo(ox, oy);
-      context.lineTo(ox - arrowSize * Math.cos(angle - Math.PI / 6), oy - arrowSize * Math.sin(angle - Math.PI / 6));
-      context.lineTo(ox - arrowSize * Math.cos(angle + Math.PI / 6), oy - arrowSize * Math.sin(angle + Math.PI / 6));
-      context.closePath();
-      context.fill();
-
-      const text = `${relation.predicate} ${Math.round(relation.score * 100)}%`;
-      const textWidth = context.measureText(text).width + 10;
-      const tx = Math.min(Math.max(2, (sx + ox) / 2 - textWidth / 2), Math.max(2, width - textWidth - 2));
-      const ty = Math.min(Math.max(12, (sy + oy) / 2), height - 12);
-      context.fillStyle = "rgba(4, 19, 25, 0.88)";
-      context.fillRect(tx, ty - 11, textWidth, 22);
-      context.fillStyle = "#ffd2ad";
-      context.fillText(text, tx + 5, ty);
-    });
-
-    context.restore();
-  }, []);
+        const latest = trackerRef.current;
+        setActiveTrackCount(latest.activeTrackCount);
+      } catch (caught) {
+        if (generation !== generationRef.current) return;
+        const message = caught instanceof Error ? caught.message : "Live relation inference failed.";
+        setRelationState("error");
+        setRelationStatus(message);
+        setError(`RelateAnything: ${message}`);
+        setLiveSceneEnabled(false);
+      } finally {
+        relationBusyRef.current = false;
+      }
+    },
+    [liveSceneEnabled, relationThreshold],
+  );
 
   const analyseSource = useCallback(
     async (source: HTMLVideoElement | HTMLImageElement, live: boolean): Promise<Detection[]> => {
@@ -307,12 +391,11 @@ export default function App() {
         });
         const elapsed = performance.now() - started;
 
-        const allItems = result.detections
+        const rawItems = result.detections
           .map((item): Detection | null => {
             if (item.confidence < threshold) return null;
-            const mapped = mapDetection(item.classId, "all");
+            const mapped = mapDetection(item.classId);
             if (!mapped) return null;
-
             return {
               x1: item.bbox[0],
               y1: item.bbox[1],
@@ -324,11 +407,18 @@ export default function App() {
             };
           })
           .filter((item): item is Detection => item !== null);
+
+        const allItems: Detection[] = live ? trackerRef.current.update(rawItems) : rawItems;
+        if (live) setActiveTrackCount(trackerRef.current.activeTrackCount);
+
         const visibleItems = displayMode === "all" ? allItems : allItems.filter((item) => item.group !== "Other");
+        const movingRelations = live
+          ? resolveRelationBoxes(currentRelationsRef.current, allItems as TrackedDetection<Detection>[])
+          : currentRelationsRef.current;
 
         setDetections(visibleItems);
         setProvider(model.provider || "wasm");
-        drawDetections(visibleItems, width, height);
+        drawFrame(visibleItems, movingRelations, width, height);
 
         if (live && warmupRef.current > 0) {
           warmupRef.current -= 1;
@@ -342,6 +432,14 @@ export default function App() {
           setCurrentMs(elapsed);
           setAverageMs(mean);
           setAnalysedFrames((count) => count + 1);
+
+          if (liveSceneEnabled && allItems.length >= 2 && source instanceof HTMLVideoElement) {
+            const now = performance.now();
+            if (!relationBusyRef.current && now - lastRelationAtRef.current >= relationCadenceMs) {
+              lastRelationAtRef.current = now;
+              void runLiveRelations(source, allItems as TrackedDetection<Detection>[]);
+            }
+          }
         } else {
           timingRef.current = [elapsed];
           setCurrentMs(elapsed);
@@ -358,7 +456,15 @@ export default function App() {
         busyRef.current = false;
       }
     },
-    [displayMode, drawDetections, ensureModel, threshold],
+    [
+      displayMode,
+      drawFrame,
+      ensureModel,
+      liveSceneEnabled,
+      relationCadenceMs,
+      runLiveRelations,
+      threshold,
+    ],
   );
 
   useEffect(() => {
@@ -451,6 +557,7 @@ export default function App() {
         setCameraActive(true);
         lastStartRef.current = 0;
         setRunning(true);
+        setRelationStatus("Camera tracking is active. Enable Live Scene AI when you want relationship inference.");
       } catch (caught) {
         stopCamera();
         setSelectedCamera(null);
@@ -459,6 +566,33 @@ export default function App() {
     },
     [ensureModel, requestCameraStream, resetStats, stopCamera, syncCameraAspect],
   );
+
+  const toggleLiveScene = useCallback(() => {
+    if (!cameraActive) return;
+
+    if (liveSceneEnabled) {
+      setLiveSceneEnabled(false);
+      smootherRef.current.reset();
+      currentRelationsRef.current = [];
+      setSceneRelations([]);
+      setRelationState("idle");
+      setRelationStatus("Live Scene AI paused. Object detection and tracking continue.");
+      clearOverlay();
+      return;
+    }
+
+    generationRef.current += 1;
+    smootherRef.current.reset();
+    currentRelationsRef.current = [];
+    lastRelationAtRef.current = 0;
+    setSceneRelations([]);
+    setRelationMs(0);
+    setRelationUpdates(0);
+    setError("");
+    setLiveSceneEnabled(true);
+    setRelationState("loading");
+    setRelationStatus("Live Scene AI enabled. The next tracked frame will load/run RelateAnything.");
+  }, [cameraActive, clearOverlay, liveSceneEnabled]);
 
   const handleImage = useCallback(
     (event: ChangeEvent<HTMLInputElement>) => {
@@ -477,6 +611,7 @@ export default function App() {
       setSourceMode("image");
       setSourceName(file.name);
       setError("");
+      setRelationStatus("Image ready. Detect objects or run scene understanding.");
       event.target.value = "";
     },
     [resetStats, stopCamera],
@@ -490,86 +625,130 @@ export default function App() {
 
   const analyseScene = useCallback(async () => {
     const image = imageRef.current;
-    if (!image || !imageUrl || relationBusy) return;
+    if (!image || !imageUrl || relationBusyRef.current) return;
 
     resetStats(0);
+    const generation = generationRef.current;
+    relationBusyRef.current = true;
     setRelationState("loading");
     setRelationStatus("Running YOLOX-S first so RelateAnything receives real detected boxes…");
     setError("");
 
     const allItems = await analyseSource(image, false);
+    if (generation !== generationRef.current) {
+      relationBusyRef.current = false;
+      return;
+    }
+
     if (allItems.length < 2) {
+      relationBusyRef.current = false;
       setRelationState("done");
       setRelationStatus("Scene understanding needs at least two detected objects. Try a lower detection confidence.");
       return;
     }
 
     const handleUpdate = (update: RelationLoadUpdate) => {
+      if (generation !== generationRef.current) return;
       setRelationState(update.stage === "inference" ? "running" : "loading");
       setRelationStatus(update.message);
     };
 
     try {
       const result = await analyseRelationships(image, allItems, relationThreshold, handleUpdate);
+      if (generation !== generationRef.current) return;
+
+      currentRelationsRef.current = result.relations;
       setSceneRelations(result.relations);
       setRelationMs(result.inferenceMs);
+      setRelationUpdates(1);
       setRelationState("done");
       setRelationStatus(
         result.relations.length
           ? `Found ${result.relations.length} ranked relationship${result.relations.length === 1 ? "" : "s"}.`
           : "No relationship crossed the current threshold. Try lowering the relationship confidence.",
       );
-      drawRelations(result.relations, image.naturalWidth, image.naturalHeight);
+      const visibleItems = displayMode === "all" ? allItems : allItems.filter((item) => item.group !== "Other");
+      drawFrame(visibleItems, result.relations, image.naturalWidth, image.naturalHeight);
     } catch (caught) {
+      if (generation !== generationRef.current) return;
       const message = caught instanceof Error ? caught.message : "Scene-understanding inference failed.";
       setRelationState("error");
       setRelationStatus(message);
       setError(`RelateAnything: ${message}`);
+    } finally {
+      relationBusyRef.current = false;
     }
-  }, [analyseSource, drawRelations, imageUrl, relationBusy, relationThreshold, resetStats]);
+  }, [analyseSource, displayMode, drawFrame, imageUrl, relationThreshold, resetStats]);
 
   const changeDisplayMode = useCallback(
     (mode: DisplayMode) => {
       setDisplayMode(mode);
-      resetStats(0);
+      resetTracking();
+      clearOverlay();
+      setRelationStatus(
+        sourceMode === "camera"
+          ? "Display filter changed. Tracking has restarted and Live Scene AI will rebuild relationships."
+          : "Display filter changed. Run the image analysis again to refresh the overlay.",
+      );
     },
-    [resetStats],
+    [clearOverlay, resetTracking, sourceMode],
   );
 
   const changeDetectionThreshold = useCallback(
     (value: number) => {
       setThreshold(value);
-      setSceneRelations([]);
+      resetTracking();
       setRelationMs(0);
-      if (sourceMode === "image") {
-        setRelationState("idle");
-        setRelationStatus("Detection confidence changed. Run scene understanding again for fresh relationships.");
-      }
+      setRelationState("idle");
+      setRelationStatus(
+        sourceMode === "camera"
+          ? "Detection confidence changed. Tracking and live relationships will rebuild automatically."
+          : "Detection confidence changed. Run scene understanding again for fresh relationships.",
+      );
     },
-    [sourceMode],
+    [resetTracking, sourceMode],
   );
 
-  const changeRelationThreshold = useCallback((value: number) => {
-    setRelationThreshold(value);
-    setSceneRelations([]);
-    setRelationMs(0);
-    setRelationState("idle");
-    setRelationStatus("Relationship confidence changed. Run scene understanding again to apply it.");
+  const changeRelationThreshold = useCallback(
+    (value: number) => {
+      setRelationThreshold(value);
+      smootherRef.current.reset();
+      currentRelationsRef.current = [];
+      setSceneRelations([]);
+      setRelationMs(0);
+      setRelationUpdates(0);
+      setRelationState("idle");
+      lastRelationAtRef.current = 0;
+      setRelationStatus(
+        sourceMode === "camera" && liveSceneEnabled
+          ? "Relationship confidence changed. The next live relation pass will use the new threshold."
+          : "Relationship confidence changed. Run scene understanding again to apply it.",
+      );
+    },
+    [liveSceneEnabled, sourceMode],
+  );
+
+  const changeRelationCadence = useCallback((value: number) => {
+    setRelationCadenceMs(value);
+    lastRelationAtRef.current = 0;
+    setRelationStatus(`Live relation cadence set to ${(value / 1000).toFixed(1)} seconds.`);
   }, []);
 
   return (
     <main className="page-shell">
       <header className="hero">
         <p className="eyebrow">CCTV AI browser lab</p>
-        <h1>Object Detection + Scene Understanding</h1>
+        <h1>Object Detection + Live Scene Understanding</h1>
         <p className="intro">
-          YOLOX-S detects objects locally in the browser. Phase 1 now feeds those detected boxes into RelateAnything
-          to infer visual relationships such as wearing, riding, holding, carrying, beside, and behind on uploaded images.
+          Phase 2 keeps YOLOX-S detection running continuously, assigns lightweight track IDs, and runs RelateAnything
+          at a controlled cadence so visual relationships can persist across live camera frames instead of flickering
+          frame by frame.
         </p>
         <div className="badges">
           <span>YOLOX-S · {MODEL_INPUT}px</span>
           <span>{provider.toUpperCase()}</span>
-          <span>RelateAnything · Phase 1</span>
+          <span>RelateAnything · Phase 2</span>
+          <span>IoU tracking + relation smoothing</span>
           <span>{displayMode === "focus" ? "Human + Vehicle view" : "All COCO · 80 classes"}</span>
         </div>
       </header>
@@ -582,17 +761,19 @@ export default function App() {
           </div>
           <div className={`live-state ${running || relationBusy ? "active" : ""}`}>
             <i />
-            {sourceMode === "image" && relationBusy
-              ? relationState === "running"
-                ? "Understanding scene"
-                : "Loading relation AI"
+            {sourceMode === "camera" && liveSceneEnabled && relationBusy
+              ? "Live scene analysis"
               : modelState === "loading"
                 ? `Loading detector ${modelProgress}%`
                 : running
-                  ? "Detecting"
-                  : sourceMode === "image" && imageUrl
-                    ? "Image ready"
-                    : "Ready"}
+                  ? liveSceneEnabled
+                    ? "Detection + tracking + scene AI"
+                    : "Detection + tracking"
+                  : sourceMode === "image" && relationBusy
+                    ? "Understanding scene"
+                    : sourceMode === "image" && imageUrl
+                      ? "Image ready"
+                      : "Ready"}
           </div>
         </div>
 
@@ -615,24 +796,23 @@ export default function App() {
 
         <div className="metrics">
           <Metric label="Detections" value={detections.length} />
-          <Metric label="Humans" value={humans} />
-          <Metric label="Vehicles" value={vehicles} />
-          {displayMode === "all" ? <Metric label="Other objects" value={otherObjects} /> : null}
-          {sourceMode === "image" ? (
+          {sourceMode === "camera" ? (
             <>
-              <Metric label="Detection time" value={formatMs(currentMs)} />
+              <Metric label="Active tracks" value={activeTrackCount} />
               <Metric label="Relationships" value={sceneRelations.length || "—"} />
+              <Metric label="Relation updates" value={relationUpdates || "—"} />
+              <Metric label="Detector avg" value={formatMs(averageMs)} />
               <Metric label="Relation time" value={formatMs(relationMs)} />
+              <Metric label="Detector rate" value={effectiveFps ? `${effectiveFps.toFixed(1)} FPS` : "—"} />
             </>
           ) : (
             <>
-              <Metric label="Current" value={formatMs(currentMs)} />
-              <Metric
-                label="Stable average"
-                value={formatMs(averageMs)}
-                note={analysedFrames ? `${analysedFrames} timed frames` : undefined}
-              />
-              <Metric label="Effective" value={effectiveFps ? `${effectiveFps.toFixed(1)} FPS` : "—"} />
+              <Metric label="Humans" value={humans} />
+              <Metric label="Vehicles" value={vehicles} />
+              {displayMode === "all" ? <Metric label="Other objects" value={otherObjects} /> : null}
+              <Metric label="Detection time" value={formatMs(currentMs)} />
+              <Metric label="Relationships" value={sceneRelations.length || "—"} />
+              <Metric label="Relation time" value={formatMs(relationMs)} />
             </>
           )}
         </div>
@@ -643,7 +823,7 @@ export default function App() {
           <span>1</span>
           <div>
             <h2>Choose source</h2>
-            <p>Object detection works with camera or image. Phase 1 scene understanding is intentionally image-only.</p>
+            <p>Use live camera tracking or upload a still image. Both can now use RelateAnything.</p>
           </div>
         </div>
 
@@ -664,27 +844,33 @@ export default function App() {
             Upload image
             <input type="file" accept="image/*" onChange={handleImage} />
           </label>
+
           {sourceMode === "image" ? (
             <button onClick={() => void analyseImage()} disabled={!imageUrl || modelState !== "ready" || relationBusy}>
               Detect objects
             </button>
           ) : cameraActive ? (
-            <button onClick={() => setRunning((value) => !value)}>{running ? "Pause AI" : "Resume AI"}</button>
+            <button onClick={() => setRunning((value) => !value)}>{running ? "Pause detector" : "Resume detector"}</button>
           ) : null}
+
           {sourceMode === "image" ? (
             <button
               className="scene-action"
               onClick={() => void analyseScene()}
               disabled={!imageUrl || modelState !== "ready" || relationBusy}
             >
-              {relationBusy ? "Working…" : "Understand scene · Phase 1"}
+              {relationBusy ? "Working…" : "Understand scene"}
+            </button>
+          ) : cameraActive ? (
+            <button className={liveSceneEnabled ? "scene-action active-scene" : "scene-action"} onClick={toggleLiveScene}>
+              {liveSceneEnabled ? "Stop Live Scene AI" : "Start Live Scene AI"}
             </button>
           ) : null}
         </div>
 
         <p className="source-note">
-          Media stays in your browser. Scene understanding downloads the released RelateAnything model on the first run,
-          then inference also runs locally in the browser.
+          Live relation inference is intentionally slower than the detector. Object boxes keep updating every detector pass,
+          while RelateAnything runs at the selected cadence and tracked IDs keep relationships attached to moving objects.
         </p>
       </section>
 
@@ -693,7 +879,7 @@ export default function App() {
           <span>2</span>
           <div>
             <h2>Detection set</h2>
-            <p>The view can focus on humans and road vehicles. Scene understanding still uses all detected COCO objects.</p>
+            <p>The display can focus on humans and road vehicles. Scene understanding still receives all detected COCO objects.</p>
           </div>
         </div>
         <div className="source-grid">
@@ -717,7 +903,7 @@ export default function App() {
           <span>3</span>
           <div>
             <h2>Detection confidence</h2>
-            <p>Default is 60%. Lower values find more candidate objects but may also add false detections.</p>
+            <p>Default is 60%. Live track IDs are rebuilt when this threshold changes.</p>
           </div>
         </div>
         <div className="slider-row">
@@ -737,20 +923,52 @@ export default function App() {
         <div className="section-title">
           <span>4</span>
           <div>
-            <h2>Scene understanding · Phase 1</h2>
-            <p>YOLOX-S boxes → RelateAnything ViT-S+ → ranked CCTV-oriented relationships.</p>
+            <h2>Scene understanding · Phase 2</h2>
+            <p>Tracked YOLOX-S boxes → periodic RelateAnything inference → temporal relation smoothing.</p>
           </div>
         </div>
 
         <div className={`scene-status ${relationBusy ? "active" : relationState === "error" ? "error" : ""}`}>
-          <strong>{relationBusy ? "Working" : relationState === "done" ? "Result" : relationState === "error" ? "Error" : "Ready"}</strong>
-          <span>{sourceMode === "camera" ? "Upload an image to use Phase 1 scene understanding." : relationStatus}</span>
+          <strong>
+            {relationBusy
+              ? "Working"
+              : sourceMode === "camera" && liveSceneEnabled
+                ? "Live"
+                : relationState === "done"
+                  ? "Result"
+                  : relationState === "error"
+                    ? "Error"
+                    : "Ready"}
+          </strong>
+          <span>{relationStatus}</span>
         </div>
+
+        {sourceMode === "camera" ? (
+          <div className="cadence-block">
+            <div>
+              <strong>Live relation cadence</strong>
+              <small>
+                Faster updates feel more live but increase CPU/GPU load. Balanced is the recommended starting point on phones.
+              </small>
+            </div>
+            <div className="cadence-grid">
+              {[1000, 1500, 3000].map((value) => (
+                <button
+                  key={value}
+                  className={relationCadenceMs === value ? "primary" : undefined}
+                  onClick={() => changeRelationCadence(value)}
+                >
+                  {value === 1000 ? "Fast · 1.0s" : value === 1500 ? "Balanced · 1.5s" : "Light · 3.0s"}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
 
         <div className="relation-threshold">
           <div>
             <strong>Relationship confidence</strong>
-            <small>Released calibrated score. Lower values show more relationships but can become noisy.</small>
+            <small>Released calibrated relation score. Lower values show more relationships but can become noisy.</small>
           </div>
           <div className="slider-row compact">
             <input
@@ -768,11 +986,14 @@ export default function App() {
         {sceneRelations.length ? (
           <div className="relation-list">
             {sceneRelations.map((relation, index) => (
-              <div className="relation-row" key={`${relation.subject.label}-${relation.predicate}-${relation.object.label}-${index}`}>
+              <div
+                className="relation-row"
+                key={`${relation.subject.trackId ?? relation.subject.label}-${relation.predicate}-${relation.object.trackId ?? relation.object.label}-${index}`}
+              >
                 <div className="relation-chain">
-                  <strong>{relation.subject.label}</strong>
+                  <strong>{relationObjectName(relation.subject)}</strong>
                   <span>→ {relation.predicate} →</span>
-                  <strong>{relation.object.label}</strong>
+                  <strong>{relationObjectName(relation.object)}</strong>
                 </div>
                 <span className="relation-score">{Math.round(relation.score * 100)}%</span>
               </div>
@@ -780,16 +1001,32 @@ export default function App() {
           </div>
         ) : (
           <div className="empty-relations">
-            {sourceMode === "image" && imageUrl
-              ? "Press “Understand scene · Phase 1” to detect objects and infer relationships."
-              : "Upload an image to begin."}
+            {sourceMode === "camera"
+              ? cameraActive
+                ? liveSceneEnabled
+                  ? "Tracking is active. Relationships will appear after the next RelateAnything pass."
+                  : "Press “Start Live Scene AI” to add live relationships on top of object tracking."
+                : "Start a camera to use Phase 2 live scene understanding."
+              : imageUrl
+                ? "Press “Understand scene” to detect objects and infer relationships."
+                : "Upload an image to begin."}
           </div>
         )}
 
+        <div className="phase-flow">
+          <span>Detector</span>
+          <i>→</i>
+          <span>Track IDs</span>
+          <i>→</i>
+          <span>RelateAnything</span>
+          <i>→</i>
+          <span>Temporal smoothing</span>
+        </div>
+
         <p className="scene-note">
-          Phase 1 uses a compact released vocabulary including wearing, riding, holding, carrying, sitting on, using,
-          attached to, beside, in front of, behind, above, and below. Object labels are used for display only; the relation
-          model receives pixels plus bounding boxes.
+          Phase 2 uses a lightweight browser IoU tracker rather than a second tracking neural network. RelateAnything still
+          receives pixels plus boxes, not object names. Tracking is used after detection to keep object IDs and relation
+          overlays more stable between relation-inference passes.
         </p>
       </section>
 
@@ -797,16 +1034,16 @@ export default function App() {
 
       <footer className="footer-card">
         <div>
-          <strong>YOLOX-S detector</strong>
-          <p>Runs at its native 640 × 640 input with WebGPU preferred and WASM fallback.</p>
+          <strong>Continuous detection</strong>
+          <p>YOLOX-S keeps running at 640 × 640 while lightweight IoU tracking assigns short-lived object IDs.</p>
         </div>
         <div>
-          <strong>RelateAnything</strong>
-          <p>Phase 1 runs the released relation model through ONNX Runtime Web/WASM for uploaded images.</p>
+          <strong>Periodic relation AI</strong>
+          <p>RelateAnything runs every 1–3 seconds instead of every detector frame, reducing live browser load.</p>
         </div>
         <div>
           <strong>Local media</strong>
-          <p>Camera frames and uploaded images are analysed in-browser; the image is not uploaded to an inference API.</p>
+          <p>Camera frames and uploaded images are analysed in-browser; no image inference API was added.</p>
         </div>
       </footer>
 

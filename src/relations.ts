@@ -1,5 +1,7 @@
 import * as ort from "onnxruntime-web";
 
+export type RelationSource = HTMLImageElement | HTMLVideoElement | HTMLCanvasElement;
+
 export type RelationDetection = {
   x1: number;
   y1: number;
@@ -7,6 +9,8 @@ export type RelationDetection = {
   y2: number;
   confidence: number;
   label: string;
+  trackId?: number;
+  trackAge?: number;
 };
 
 export type SceneRelation = {
@@ -85,8 +89,8 @@ const DEFAULT_BANK_PREDICATES = [
   "below",
 ] as const;
 
-// Phase 1 keeps a compact CCTV-oriented vocabulary so the output is easier to
-// interpret. These strings are all part of the released predicate bank.
+// A compact CCTV-oriented vocabulary keeps live output understandable and
+// reduces the host-side score matrix. Every string is in the released bank.
 const CCTV_PREDICATES = [
   "wearing",
   "riding",
@@ -275,11 +279,17 @@ async function loadRelationSession(onUpdate?: (update: RelationLoadUpdate) => vo
   return sessionPromise;
 }
 
-function sourceDimensions(source: HTMLImageElement) {
-  return { width: source.naturalWidth, height: source.naturalHeight };
+function sourceDimensions(source: RelationSource) {
+  if (source instanceof HTMLVideoElement) {
+    return { width: source.videoWidth, height: source.videoHeight };
+  }
+  if (source instanceof HTMLImageElement) {
+    return { width: source.naturalWidth, height: source.naturalHeight };
+  }
+  return { width: source.width, height: source.height };
 }
 
-function makeImageTensor(source: HTMLImageElement) {
+function makeImageTensor(source: RelationSource) {
   const canvas = document.createElement("canvas");
   canvas.width = MODEL_SIZE;
   canvas.height = MODEL_SIZE;
@@ -300,7 +310,7 @@ function makeImageTensor(source: HTMLImageElement) {
   return new ort.Tensor("float32", chw, [1, 3, MODEL_SIZE, MODEL_SIZE]);
 }
 
-function makeBoxesTensor(source: HTMLImageElement, detections: RelationDetection[]) {
+function makeBoxesTensor(source: RelationSource, detections: RelationDetection[]) {
   const { width, height } = sourceDimensions(source);
   const padded = new Float32Array(MAX_BOXES * 4);
 
@@ -323,7 +333,7 @@ function boolAt(data: Uint8Array, index: number) {
 }
 
 export async function analyseRelationships(
-  source: HTMLImageElement,
+  source: RelationSource,
   detections: RelationDetection[],
   threshold: number,
   onUpdate?: (update: RelationLoadUpdate) => void,
@@ -334,6 +344,11 @@ export async function analyseRelationships(
 
   if (selectedDetections.length < 2) {
     return { relations: [] as SceneRelation[], inferenceMs: 0, usedDetections: selectedDetections };
+  }
+
+  const dimensions = sourceDimensions(source);
+  if (!dimensions.width || !dimensions.height) {
+    throw new Error("Source frame is not ready for relation inference.");
   }
 
   const [bank, session] = await Promise.all([loadPredicateBank(onUpdate), loadRelationSession(onUpdate)]);
