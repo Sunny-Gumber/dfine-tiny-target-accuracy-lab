@@ -6,6 +6,7 @@ import {
   type SceneRelation,
 } from "./relations";
 import {
+  deduplicateDetections,
   IoUTracker,
   RelationSmoother,
   resolveRelationBoxes,
@@ -39,6 +40,7 @@ const CAMERA_WIDTH = 640;
 const CAMERA_HEIGHT = 360;
 const CAMERA_WARMUP_RUNS = 3;
 const LOOP_GAP_MS = 16;
+const RELATION_MIN_TRACK_AGE = 2;
 const ROAD_VEHICLE_CLASSES = new Set([1, 2, 3, 5, 7]);
 
 function titleCase(value: string) {
@@ -281,7 +283,7 @@ export default function App() {
       modelFamily: "yolox",
       confThres: 0.12,
       iouThres: 0.65,
-      maxDet: 120,
+      maxDet: 40,
       onProgress: (progress) => {
         setModelProgress(Math.max(2, Math.min(99, Math.round(progress * 100))));
       },
@@ -322,7 +324,8 @@ export default function App() {
 
   const runLiveRelations = useCallback(
     async (source: HTMLVideoElement, trackedItems: TrackedDetection<Detection>[]) => {
-      if (!liveSceneEnabled || relationBusyRef.current || trackedItems.length < 2) return;
+      const relationCandidates = trackedItems.filter((item) => item.trackAge >= RELATION_MIN_TRACK_AGE);
+      if (!liveSceneEnabled || relationBusyRef.current || relationCandidates.length < 2) return;
 
       const generation = generationRef.current;
       relationBusyRef.current = true;
@@ -340,7 +343,7 @@ export default function App() {
       };
 
       try {
-        const result = await analyseRelationships(source, trackedItems, relationThreshold, handleUpdate);
+        const result = await analyseRelationships(source, relationCandidates, relationThreshold, handleUpdate);
         if (generation !== generationRef.current) return;
 
         const stable = smootherRef.current.update(result.relations);
@@ -387,7 +390,7 @@ export default function App() {
         const result = await model.predict(source, {
           confThres: Math.max(0.08, threshold),
           iouThres: 0.65,
-          maxDet: 120,
+          maxDet: 40,
         });
         const elapsed = performance.now() - started;
 
@@ -408,7 +411,10 @@ export default function App() {
           })
           .filter((item): item is Detection => item !== null);
 
-        const allItems: Detection[] = live ? trackerRef.current.update(rawItems) : rawItems;
+        const deduplicatedItems = deduplicateDetections(rawItems, 0.45, 0.72);
+        const allItems: Detection[] = live
+          ? trackerRef.current.update(deduplicatedItems)
+          : deduplicatedItems;
         if (live) setActiveTrackCount(trackerRef.current.activeTrackCount);
 
         const visibleItems = displayMode === "all" ? allItems : allItems.filter((item) => item.group !== "Other");
@@ -418,7 +424,7 @@ export default function App() {
 
         setDetections(visibleItems);
         setProvider(model.provider || "wasm");
-        drawFrame(visibleItems, movingRelations, width, height);
+        drawFrame(liveSceneEnabled && live ? [] : visibleItems, movingRelations, width, height);
 
         if (live && warmupRef.current > 0) {
           warmupRef.current -= 1;
@@ -590,8 +596,11 @@ export default function App() {
     setRelationUpdates(0);
     setError("");
     setLiveSceneEnabled(true);
+    clearOverlay();
     setRelationState("loading");
-    setRelationStatus("Live Scene AI enabled. The next tracked frame will load/run RelateAnything.");
+    setRelationStatus(
+      "Live Scene AI enabled. Detector boxes are hidden; only final relationships will be drawn.",
+    );
   }, [cameraActive, clearOverlay, liveSceneEnabled]);
 
   const handleImage = useCallback(
@@ -668,7 +677,7 @@ export default function App() {
           : "No relationship crossed the current threshold. Try lowering the relationship confidence.",
       );
       const visibleItems = displayMode === "all" ? allItems : allItems.filter((item) => item.group !== "Other");
-      drawFrame(visibleItems, result.relations, image.naturalWidth, image.naturalHeight);
+      drawFrame([], result.relations, image.naturalWidth, image.naturalHeight);
     } catch (caught) {
       if (generation !== generationRef.current) return;
       const message = caught instanceof Error ? caught.message : "Scene-understanding inference failed.";
@@ -869,8 +878,9 @@ export default function App() {
         </div>
 
         <p className="source-note">
-          Live relation inference is intentionally slower than the detector. Object boxes keep updating every detector pass,
-          while RelateAnything runs at the selected cadence and tracked IDs keep relationships attached to moving objects.
+          Live relation inference is intentionally slower than the detector. When Live Scene AI is enabled, detector boxes
+          are hidden from the viewport, duplicate detections are suppressed, and only the strongest eight objects are offered
+          to RelateAnything. Tracking still runs internally so final relationship arrows can follow moving objects.
         </p>
       </section>
 
@@ -924,7 +934,7 @@ export default function App() {
           <span>4</span>
           <div>
             <h2>Scene understanding · Phase 2</h2>
-            <p>Tracked YOLOX-S boxes → periodic RelateAnything inference → temporal relation smoothing.</p>
+            <p>Clean camera frame + deduplicated tracked boxes → RelateAnything → final relationship overlay only.</p>
           </div>
         </div>
 
@@ -1024,9 +1034,9 @@ export default function App() {
         </div>
 
         <p className="scene-note">
-          Phase 2 uses a lightweight browser IoU tracker rather than a second tracking neural network. RelateAnything still
-          receives pixels plus boxes, not object names. Tracking is used after detection to keep object IDs and relation
-          overlays more stable between relation-inference passes.
+          The detector boxes are now internal guidance only and are hidden while Live Scene AI is active. RelateAnything
+          receives the clean camera pixels plus deduplicated box coordinates, not a frame with yellow rectangles painted on it.
+          Only stable tracks are considered for live relation passes, and at most eight high-confidence objects are evaluated.
         </p>
       </section>
 
