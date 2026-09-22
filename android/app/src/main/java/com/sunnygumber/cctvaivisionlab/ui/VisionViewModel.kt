@@ -22,6 +22,7 @@ import com.sunnygumber.cctvaivisionlab.tracking.RelationSmoother
 import com.sunnygumber.cctvaivisionlab.tracking.deduplicateDetections
 import com.sunnygumber.cctvaivisionlab.tracking.resolveRelationBoxes
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -74,6 +75,7 @@ class VisionViewModel(application: Application) : AndroidViewModel(application) 
     private val smoother = RelationSmoother()
     private val scheduler = InferenceScheduler()
     private val processingFrame = AtomicBoolean(false)
+    private val generation = AtomicLong(0)
 
     private var detector: YoloXDetector? = null
     private var relationEngine: RelateAnythingEngine? = null
@@ -195,6 +197,14 @@ class VisionViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun clearModels() {
+        if (processingFrame.get()) {
+            _state.value = _state.value.copy(
+                running = false,
+                statusMessage = "AI paused. Wait for the current inference to finish, then clear models.",
+            )
+            return
+        }
+
         viewModelScope.launch {
             stopAndReset("Clearing locally stored models…")
             withContext(Dispatchers.Default) {
@@ -235,6 +245,7 @@ class VisionViewModel(application: Application) : AndroidViewModel(application) 
         }
         if (!processingFrame.compareAndSet(false, true)) return
 
+        val requestGeneration = generation.get()
         viewModelScope.launch(Dispatchers.Default) {
             try {
                 val frame = ImageFrameLoader.load(
@@ -245,6 +256,7 @@ class VisionViewModel(application: Application) : AndroidViewModel(application) 
                     frame = frame,
                     forceRelation = _state.value.liveSceneEnabled,
                     isLive = false,
+                    requestGeneration = requestGeneration,
                 )
             } catch (error: Throwable) {
                 _state.value = _state.value.copy(
@@ -278,10 +290,16 @@ class VisionViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         if (!processingFrame.compareAndSet(false, true)) return
+        val requestGeneration = generation.get()
 
         viewModelScope.launch(Dispatchers.Default) {
             try {
-                processFrame(frame = frame, forceRelation = false, isLive = true)
+                processFrame(
+                    frame = frame,
+                    forceRelation = false,
+                    isLive = true,
+                    requestGeneration = requestGeneration,
+                )
             } catch (error: Throwable) {
                 _state.value = _state.value.copy(
                     running = false,
@@ -298,6 +316,7 @@ class VisionViewModel(application: Application) : AndroidViewModel(application) 
         frame: FrameData,
         forceRelation: Boolean,
         isLive: Boolean,
+        requestGeneration: Long,
     ) {
         val currentDetector = detector ?: error("Detector is not initialized")
         val snapshot = _state.value
@@ -308,6 +327,8 @@ class VisionViewModel(application: Application) : AndroidViewModel(application) 
         } finally {
             scheduler.markDetectorFinished(System.nanoTime())
         }
+
+        if (requestGeneration != generation.get()) return
 
         val deduplicated = deduplicateDetections(detectionResult.detections, 0.45f, 0.72f)
         val tracked = if (isLive) tracker.update(deduplicated) else deduplicated
@@ -329,6 +350,7 @@ class VisionViewModel(application: Application) : AndroidViewModel(application) 
                 )
 
         if (relationDue && stableCandidates.size >= 2) {
+            if (requestGeneration != generation.get()) return
             val currentRelationEngine = relationEngine
                 ?: error("Relation engine is not initialized")
             val started = System.nanoTime()
@@ -350,6 +372,8 @@ class VisionViewModel(application: Application) : AndroidViewModel(application) 
                 scheduler.markRelationFinished(System.nanoTime())
             }
         }
+
+        if (requestGeneration != generation.get()) return
 
         _state.value = _state.value.copy(
             detections = tracked,
@@ -453,7 +477,6 @@ class VisionViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun stopAndReset(message: String) {
-        processingFrame.set(false)
         resetTracking()
         _state.value = _state.value.copy(
             running = false,
@@ -464,6 +487,7 @@ class VisionViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun resetTracking() {
+        generation.incrementAndGet()
         tracker.reset()
         smoother.reset()
         scheduler.reset()
