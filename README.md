@@ -91,11 +91,13 @@ with the calibration values shipped by the upstream model. Detector confidence a
 
 Camera frames and uploaded images are processed in the browser and are not sent to an inference API.
 
-YOLOX-S and RelateAnything model assets still have to be downloaded by the browser. RelateAnything is lazy-loaded when scene understanding is first requested because its ONNX model is substantially larger than the detector.
+YOLOX-S and RelateAnything model assets still have to be downloaded once by the browser. The site now installs a service worker with a dedicated Cache Storage bucket for `.onnx`, `.npz`, and ONNX Runtime `.wasm` assets. After the first successful download, later visits reuse the local cached copy instead of fetching the same model again. RelateAnything remains lazy-loaded until scene understanding is first requested because its ONNX model is substantially larger than the detector.
 
 RelateAnything now tries the browser **WebGPU** execution provider first. This allows a compatible internal Intel/AMD/NVIDIA laptop GPU to accelerate the relation model. If WebGPU is unavailable or the model cannot create a WebGPU session, the app automatically falls back to **WASM/CPU**. The active relation runtime is shown directly in the UI so timing comparisons are unambiguous.
 
 The predicate bank is loaded from the upstream RelateAnything release, and the browser supplies a compact CCTV-oriented subset to the relation graph.
+
+The app also requests persistent browser storage when the browser supports it. Persistence is browser-controlled, so cached models can still disappear if the user clears site data, uses private/incognito mode, the browser evicts storage under pressure, or a future model-cache version is intentionally changed.
 
 ## Tech stack
 
@@ -137,11 +139,14 @@ The build runs the TypeScript check first and then creates the production bundle
 │   └── pages.yml
 ├── src/
 │   ├── App.tsx          # UI, detector flow and Phase 1/2 orchestration
+│   ├── modelCache.ts    # Service-worker bootstrap + persistent-storage request
 │   ├── relations.ts     # RelateAnything browser runtime + relation decode
 │   ├── tracking.ts      # IoU object tracker + temporal relation smoother
 │   ├── main.tsx
 │   ├── runtime.ts       # ONNX Runtime configuration
 │   └── styles.css
+├── public/
+│   └── model-cache-sw.js # Cache-first model/weight service worker
 ├── index.html
 ├── package.json
 ├── package-lock.json
