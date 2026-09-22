@@ -93,6 +93,8 @@ Camera frames and uploaded images are processed in the browser and are not sent 
 
 YOLOX-S and RelateAnything model assets still have to be downloaded by the browser. RelateAnything is lazy-loaded when scene understanding is first requested because its ONNX model is substantially larger than the detector.
 
+RelateAnything now tries the browser **WebGPU** execution provider first. This allows a compatible internal Intel/AMD/NVIDIA laptop GPU to accelerate the relation model. If WebGPU is unavailable or the model cannot create a WebGPU session, the app automatically falls back to **WASM/CPU**. The active relation runtime is shown directly in the UI so timing comparisons are unambiguous.
+
 The predicate bank is loaded from the upstream RelateAnything release, and the browser supplies a compact CCTV-oriented subset to the relation graph.
 
 ## Tech stack
@@ -101,7 +103,7 @@ The predicate bank is loaded from the upstream RelateAnything release, and the b
 - TypeScript
 - Vite
 - LibreYOLO Web
-- ONNX Runtime Web
+- ONNX Runtime Web (WebGPU first, WASM fallback for RelateAnything)
 - YOLOX-S
 - RelateAnything ViT-S+
 - Lightweight IoU object tracking
