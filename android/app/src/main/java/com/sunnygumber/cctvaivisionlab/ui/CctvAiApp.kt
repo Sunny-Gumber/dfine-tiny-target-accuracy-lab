@@ -142,6 +142,7 @@ fun CctvAiApp(viewModel: VisionViewModel) {
                             CameraPreview(
                                 facing = state.lensFacing,
                                 enabled = true,
+                                shouldCaptureFrame = viewModel::shouldCaptureCameraFrame,
                                 onFrame = viewModel::onCameraFrame,
                                 modifier = Modifier.fillMaxSize(),
                             )
