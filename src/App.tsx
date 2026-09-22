@@ -352,7 +352,7 @@ export default function App() {
         currentRelationsRef.current = stable;
         setSceneRelations(stable);
         setRelationMs(result.inferenceMs);
-        setRelationProvider(result.provider.toUpperCase());
+        if (result.provider) setRelationProvider(result.provider.toUpperCase());
         setRelationUpdates((count) => count + 1);
         setRelationState("done");
         setRelationStatus(
@@ -672,7 +672,7 @@ export default function App() {
       currentRelationsRef.current = result.relations;
       setSceneRelations(result.relations);
       setRelationMs(result.inferenceMs);
-      setRelationProvider(result.provider.toUpperCase());
+      if (result.provider) setRelationProvider(result.provider.toUpperCase());
       setRelationUpdates(1);
       setRelationState("done");
       setRelationStatus(
