@@ -40,10 +40,12 @@ export async function prepareModelCache(): Promise<ModelCacheStatus> {
   }
 
   try {
-    await navigator.serviceWorker.register(
-      `${import.meta.env.BASE_URL}model-cache-sw.js`,
-      { scope: import.meta.env.BASE_URL },
-    );
+    const appBase = new URL("./", document.baseURI);
+    const serviceWorkerUrl = new URL("model-cache-sw.js", appBase);
+
+    await navigator.serviceWorker.register(serviceWorkerUrl.pathname, {
+      scope: appBase.pathname,
+    });
     await navigator.serviceWorker.ready;
     await waitForController();
     return { supported: true, ready: true, persistent };
