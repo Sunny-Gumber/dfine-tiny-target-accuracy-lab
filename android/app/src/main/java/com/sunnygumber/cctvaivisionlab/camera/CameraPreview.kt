@@ -54,7 +54,6 @@ fun CameraPreview(
 
     DisposableEffect(facing, enabled, lifecycleOwner) {
         if (!enabled) {
-            previewView.surfaceProvider = null
             onDispose { }
         } else {
             val providerFuture = ProcessCameraProvider.getInstance(context)
