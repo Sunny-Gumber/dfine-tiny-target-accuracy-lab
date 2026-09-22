@@ -1,4 +1,4 @@
-import * as ort from "onnxruntime-web";
+import * as ort from "onnxruntime-web/webgpu";
 
 export type RelationSource = HTMLImageElement | HTMLVideoElement | HTMLCanvasElement;
 
@@ -24,6 +24,13 @@ export type SceneRelation = {
 export type RelationLoadUpdate = {
   stage: "bank" | "model" | "inference";
   message: string;
+};
+
+export type RelationProvider = "webgpu" | "wasm";
+
+type RelationSession = {
+  session: ort.InferenceSession;
+  provider: RelationProvider;
 };
 
 type PredicateBank = {
@@ -117,7 +124,7 @@ const CCTV_PREDICATES = [
 ] as const;
 
 let bankPromise: Promise<PredicateBank> | null = null;
-let sessionPromise: Promise<ort.InferenceSession> | null = null;
+let sessionPromise: Promise<RelationSession> | null = null;
 
 function sigmoid(value: number) {
   if (value >= 0) return 1 / (1 + Math.exp(-value));
@@ -261,17 +268,45 @@ async function loadRelationSession(onUpdate?: (update: RelationLoadUpdate) => vo
   if (sessionPromise) return sessionPromise;
 
   sessionPromise = (async () => {
-    onUpdate?.({
-      stage: "model",
-      message: "Loading RelateAnything model… first run downloads a large ONNX file.",
-    });
     ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.24.3/dist/";
     ort.env.wasm.numThreads = 1;
     ort.env.wasm.proxy = false;
-    return await ort.InferenceSession.create(MODEL_URL, {
+
+    const hasWebGpu =
+      typeof navigator !== "undefined" &&
+      Boolean((navigator as Navigator & { gpu?: unknown }).gpu);
+
+    if (hasWebGpu) {
+      onUpdate?.({
+        stage: "model",
+        message: "Loading RelateAnything with WebGPU… first run may take longer while the GPU pipeline compiles.",
+      });
+
+      try {
+        const session = await ort.InferenceSession.create(MODEL_URL, {
+          executionProviders: ["webgpu"],
+          graphOptimizationLevel: "all",
+        });
+        return { session, provider: "webgpu" as const };
+      } catch (error) {
+        console.warn("RelateAnything WebGPU session failed; falling back to WASM.", error);
+        onUpdate?.({
+          stage: "model",
+          message: "WebGPU is unavailable for this model/browser. Falling back to CPU/WASM…",
+        });
+      }
+    } else {
+      onUpdate?.({
+        stage: "model",
+        message: "WebGPU is not available in this browser. Loading RelateAnything on CPU/WASM…",
+      });
+    }
+
+    const session = await ort.InferenceSession.create(MODEL_URL, {
       executionProviders: ["wasm"],
       graphOptimizationLevel: "all",
     });
+    return { session, provider: "wasm" as const };
   })().catch((error) => {
     sessionPromise = null;
     throw error;
@@ -352,8 +387,12 @@ export async function analyseRelationships(
     throw new Error("Source frame is not ready for relation inference.");
   }
 
-  const [bank, session] = await Promise.all([loadPredicateBank(onUpdate), loadRelationSession(onUpdate)]);
-  onUpdate?.({ stage: "inference", message: "Finding relationships between detected objects…" });
+  const [bank, relationSession] = await Promise.all([loadPredicateBank(onUpdate), loadRelationSession(onUpdate)]);
+  const { session, provider } = relationSession;
+  onUpdate?.({
+    stage: "inference",
+    message: `Finding relationships between detected objects on ${provider === "webgpu" ? "WebGPU" : "CPU/WASM"}…`,
+  });
 
   const feeds: Record<string, ort.Tensor> = {
     image: makeImageTensor(source),
@@ -429,5 +468,6 @@ export async function analyseRelationships(
     relations: candidates.slice(0, MAX_RELATIONS),
     inferenceMs,
     usedDetections: selectedDetections,
+    provider,
   };
 }
