@@ -257,6 +257,15 @@ class VisionViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun shouldCaptureCameraFrame(): Boolean {
+        val snapshot = _state.value
+        return snapshot.sourceMode == SourceMode.CAMERA &&
+            snapshot.running &&
+            snapshot.modelsReady &&
+            detector != null &&
+            !processingFrame.get()
+    }
+
     fun onCameraFrame(frame: FrameData) {
         val snapshot = _state.value
         if (
