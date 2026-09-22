@@ -197,6 +197,7 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun clearAndRedownloadModels() {
+        resetLiveState()
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { detector?.close() }
             runCatching { relationEngine?.close() }
@@ -361,7 +362,11 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
 
         if (!runRelation) return
 
-        val relation = relationEngine ?: return
+        val relation = relationEngine
+        if (relation == null) {
+            if (live) scheduler.markRelationFinished(System.nanoTime())
+            return
+        }
         try {
             val relationResult = relation.analyse(
                 frame = frame,
@@ -373,18 +378,20 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
             } else {
                 relationResult.relations
             }
-            currentRelations = stable
-            _state.value = _state.value.copy(
-                relations = stable,
-                relationMetrics = relationResult.metrics,
-                relationUpdates = _state.value.relationUpdates + 1,
-                status = if (stable.isEmpty()) {
-                    "Scene AI active · no relationship crossed the threshold."
-                } else {
-                    "Scene AI active · ${stable.size} relationship(s)."
-                },
-                error = null,
-            )
+            if (!live || _state.value.sceneEnabled) {
+                currentRelations = stable
+                _state.value = _state.value.copy(
+                    relations = stable,
+                    relationMetrics = relationResult.metrics,
+                    relationUpdates = _state.value.relationUpdates + 1,
+                    status = if (stable.isEmpty()) {
+                        "Scene AI active · no relationship crossed the threshold."
+                    } else {
+                        "Scene AI active · ${stable.size} relationship(s)."
+                    },
+                    error = null,
+                )
+            }
         } catch (error: Throwable) {
             setError("Relation inference failed: ${error.message}")
         } finally {
