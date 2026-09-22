@@ -11,13 +11,15 @@ if (!root) {
   throw new Error("Root element not found");
 }
 
+const rootElement = root;
+
 async function bootstrap() {
   // Register and activate the model-cache service worker before App mounts.
   // This gives the first YOLOX/RelateAnything download a chance to be stored
   // so later visits can reuse the local copy instead of downloading it again.
   await prepareModelCache();
 
-  createRoot(root).render(
+  createRoot(rootElement).render(
     <StrictMode>
       <App />
     </StrictMode>,
