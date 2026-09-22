@@ -103,6 +103,7 @@ export default function App() {
     "Phase 2 is ready: upload an image or enable Live Scene AI on a camera.",
   );
   const [relationUpdates, setRelationUpdates] = useState(0);
+  const [relationProvider, setRelationProvider] = useState("waiting");
   const [activeTrackCount, setActiveTrackCount] = useState(0);
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -223,6 +224,7 @@ export default function App() {
     setSceneRelations([]);
     setRelationMs(0);
     setRelationUpdates(0);
+    setRelationProvider("waiting");
     setRelationState("idle");
     setRelationStatus(message ?? "Phase 2 is ready: upload an image or enable Live Scene AI on a camera.");
   }, []);
@@ -350,6 +352,7 @@ export default function App() {
         currentRelationsRef.current = stable;
         setSceneRelations(stable);
         setRelationMs(result.inferenceMs);
+        setRelationProvider(result.provider.toUpperCase());
         setRelationUpdates((count) => count + 1);
         setRelationState("done");
         setRelationStatus(
@@ -669,6 +672,7 @@ export default function App() {
       currentRelationsRef.current = result.relations;
       setSceneRelations(result.relations);
       setRelationMs(result.inferenceMs);
+      setRelationProvider(result.provider.toUpperCase());
       setRelationUpdates(1);
       setRelationState("done");
       setRelationStatus(
@@ -757,6 +761,7 @@ export default function App() {
           <span>YOLOX-S · {MODEL_INPUT}px</span>
           <span>{provider.toUpperCase()}</span>
           <span>RelateAnything · Phase 2</span>
+          <span>Relation runtime · {relationProvider.toUpperCase()}</span>
           <span>IoU tracking + relation smoothing</span>
           <span>{displayMode === "focus" ? "Human + Vehicle view" : "All COCO · 80 classes"}</span>
         </div>
@@ -812,6 +817,7 @@ export default function App() {
               <Metric label="Relation updates" value={relationUpdates || "—"} />
               <Metric label="Detector avg" value={formatMs(averageMs)} />
               <Metric label="Relation time" value={formatMs(relationMs)} />
+              <Metric label="Relation runtime" value={relationProvider.toUpperCase()} />
               <Metric label="Detector rate" value={effectiveFps ? `${effectiveFps.toFixed(1)} FPS` : "—"} />
             </>
           ) : (
@@ -822,6 +828,7 @@ export default function App() {
               <Metric label="Detection time" value={formatMs(currentMs)} />
               <Metric label="Relationships" value={sceneRelations.length || "—"} />
               <Metric label="Relation time" value={formatMs(relationMs)} />
+              <Metric label="Relation runtime" value={relationProvider.toUpperCase()} />
             </>
           )}
         </div>
@@ -1036,7 +1043,8 @@ export default function App() {
         <p className="scene-note">
           The detector boxes are now internal guidance only and are hidden while Live Scene AI is active. RelateAnything
           receives the clean camera pixels plus deduplicated box coordinates, not a frame with yellow rectangles painted on it.
-          Only stable tracks are considered for live relation passes, and at most eight high-confidence objects are evaluated.
+          It now tries WebGPU first so an internal Intel/AMD/NVIDIA laptop GPU can be used; if the browser or model cannot run
+          on WebGPU, it automatically falls back to CPU/WASM. Only stable tracks are considered, with at most eight objects.
         </p>
       </section>
 
