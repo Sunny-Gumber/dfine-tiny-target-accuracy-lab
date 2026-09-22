@@ -27,6 +27,7 @@ enum class LensFacing {
 fun CameraPreview(
     facing: LensFacing,
     enabled: Boolean,
+    shouldCaptureFrame: () -> Boolean = { true },
     onFrame: (FrameData) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -78,7 +79,9 @@ fun CameraPreview(
                         .also { useCase ->
                             useCase.setAnalyzer(analysisExecutor) { image ->
                                 try {
-                                    onFrame(CameraFrameConverter.fromRgba(image))
+                                    if (shouldCaptureFrame()) {
+                                        onFrame(CameraFrameConverter.fromRgba(image))
+                                    }
                                 } catch (_: Throwable) {
                                     // Drop malformed frames. The following frame remains usable.
                                 } finally {
