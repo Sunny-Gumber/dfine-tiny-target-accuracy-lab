@@ -10,7 +10,7 @@ Android V1 architecture scaffold:
 - Jetpack Compose
 - minSdk 28
 - targetSdk 36
-- compileSdk 37
+- compileSdk 36
 - Java 17
 - contracts for detector, relation engine, model manager, tracker and frame scheduler
 
