@@ -743,6 +743,7 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
         _state.value = snapshot.copy(
             detections = detections,
             relations = relations,
+            activeTracks = detections.size,
             cpuTrackingMetrics = metrics,
             metricTracks = metricTracks,
             frameWidth = detections.maxOfOrNull { it.box.right.toInt() }?.coerceAtLeast(snapshot.frameWidth)
