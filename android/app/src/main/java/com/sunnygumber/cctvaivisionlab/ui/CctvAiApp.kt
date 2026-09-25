@@ -6,6 +6,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -38,6 +39,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -47,7 +49,9 @@ import com.sunnygumber.cctvaivisionlab.camera.CameraPreview
 import com.sunnygumber.cctvaivisionlab.core.InferenceMetrics
 import com.sunnygumber.cctvaivisionlab.core.ModelState
 import com.sunnygumber.cctvaivisionlab.core.ModelStatus
+import com.sunnygumber.cctvaivisionlab.tracking.FramePoint
 import java.util.Locale
+import kotlin.math.min
 
 private val focusClasses = setOf(0, 1, 2, 3, 5, 7)
 
