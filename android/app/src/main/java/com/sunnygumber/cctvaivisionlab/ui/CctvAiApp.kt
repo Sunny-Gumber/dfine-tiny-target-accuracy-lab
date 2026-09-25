@@ -680,6 +680,26 @@ private fun LabeledSlider(
 }
 
 @Composable
+private fun MeterSlider(
+    label: String,
+    value: Float,
+    onValueChange: (Float) -> Unit,
+    range: ClosedFloatingPointRange<Float>,
+) {
+    Column {
+        Row(modifier = Modifier.fillMaxWidth()) {
+            Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
+            Text(String.format(Locale.US, "%.1f m", value))
+        }
+        Slider(
+            value = value,
+            onValueChange = onValueChange,
+            valueRange = range,
+        )
+    }
+}
+
+@Composable
 private fun ModeButton(
     label: String,
     selected: Boolean,
