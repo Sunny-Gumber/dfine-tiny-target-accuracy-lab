@@ -10,6 +10,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.nativeCanvas
 import com.sunnygumber.cctvaivisionlab.core.Detection
 import com.sunnygumber.cctvaivisionlab.core.SceneRelation
+import com.sunnygumber.cctvaivisionlab.tracking.FramePoint
+import com.sunnygumber.cctvaivisionlab.tracking.MetricTrackState
+import java.util.Locale
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.min
@@ -24,6 +27,8 @@ fun VisionOverlay(
     detections: List<Detection>,
     relations: List<SceneRelation>,
     showDetections: Boolean,
+    calibrationPoints: List<FramePoint> = emptyList(),
+    metricTracks: List<MetricTrackState> = emptyList(),
     modifier: Modifier = Modifier,
 ) {
     Canvas(modifier = modifier) {
@@ -32,6 +37,7 @@ fun VisionOverlay(
         val scale = min(size.width / frameWidth, size.height / frameHeight)
         val offsetX = (size.width - frameWidth * scale) / 2f
         val offsetY = (size.height - frameHeight * scale) / 2f
+        val metricByTrack = metricTracks.associateBy { it.trackId }
 
         fun point(x: Float, y: Float) = Offset(
             x = offsetX + x * scale,
@@ -56,6 +62,30 @@ fun VisionOverlay(
                     size = boxSize,
                     style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.5f),
                 )
+
+                val metric = detection.trackId?.let(metricByTrack::get)
+                if (metric != null) {
+                    val anchor = point(detection.box.centerX, detection.box.bottom)
+                    val text = String.format(
+                        Locale.US,
+                        "#%d %.1fm, %.1fm · %.2fm/s",
+                        metric.trackId,
+                        metric.xMeters,
+                        metric.yMeters,
+                        metric.speedMetersPerSecond,
+                    )
+                    drawContext.canvas.nativeCanvas.drawText(
+                        text,
+                        anchor.x + 6f,
+                        anchor.y - 8f,
+                        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                            color = android.graphics.Color.WHITE
+                            textSize = 22f
+                            style = Paint.Style.FILL
+                            setShadowLayer(4f, 1f, 1f, android.graphics.Color.BLACK)
+                        },
+                    )
+                }
             }
         }
 
@@ -104,6 +134,46 @@ fun VisionOverlay(
                     setShadowLayer(5f, 1f, 1f, android.graphics.Color.BLACK)
                 },
             )
+        }
+
+        val calibrationColor = Color(0xFFFFE082)
+        val mappedCalibration = calibrationPoints.map { point(it.x, it.y) }
+        mappedCalibration.forEachIndexed { index, location ->
+            drawCircle(
+                color = calibrationColor,
+                radius = 8f,
+                center = location,
+            )
+            drawContext.canvas.nativeCanvas.drawText(
+                (index + 1).toString(),
+                location.x + 10f,
+                location.y - 10f,
+                Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = android.graphics.Color.WHITE
+                    textSize = 24f
+                    style = Paint.Style.FILL
+                    setShadowLayer(4f, 1f, 1f, android.graphics.Color.BLACK)
+                },
+            )
+        }
+
+        if (mappedCalibration.size >= 2) {
+            for (index in 0 until mappedCalibration.size - 1) {
+                drawLine(
+                    color = calibrationColor,
+                    start = mappedCalibration[index],
+                    end = mappedCalibration[index + 1],
+                    strokeWidth = 3f,
+                )
+            }
+            if (mappedCalibration.size == 4) {
+                drawLine(
+                    color = calibrationColor,
+                    start = mappedCalibration.last(),
+                    end = mappedCalibration.first(),
+                    strokeWidth = 3f,
+                )
+            }
         }
     }
 }
