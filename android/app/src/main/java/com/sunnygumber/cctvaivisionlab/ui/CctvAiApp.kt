@@ -104,11 +104,11 @@ fun CctvAiApp(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                text = "Native Android AI · v0.3 optimization",
+                text = "Native Android AI · v0.4 CPU hybrid",
                 style = MaterialTheme.typography.headlineSmall,
             )
             Text(
-                text = "CameraX + native ONNX Runtime · NNAPI first, CPU fallback",
+                text = "OpenCV CPU optical flow + periodic ONNX AI · optional metric ground-plane localization",
                 style = MaterialTheme.typography.bodyMedium,
             )
 
@@ -139,6 +139,7 @@ fun CctvAiApp(
                 cameraGranted = cameraGranted,
                 requestCamera = { cameraPermission.launch(Manifest.permission.CAMERA) },
                 onImage = viewModel::onCameraImage,
+                onCalibrationTap = viewModel::addMetricCalibrationPoint,
             )
 
             if (state.sourceMode == SourceMode.IMAGE) {
@@ -283,6 +284,13 @@ fun CctvAiApp(
                 }
             }
 
+            MetricCalibrationCard(
+                state = state,
+                setWidth = viewModel::setMetricGroundWidth,
+                setDepth = viewModel::setMetricGroundDepth,
+                startCalibration = viewModel::startMetricCalibration,
+                clearCalibration = viewModel::clearMetricCalibration,
+            )
             PerformanceCard(state)
             ModelCard(state, viewModel::clearAndRedownloadModels)
             RelationCard(state)
