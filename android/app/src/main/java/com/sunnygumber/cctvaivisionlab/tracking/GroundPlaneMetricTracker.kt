@@ -63,6 +63,10 @@ class GroundPlaneMetricTracker : AutoCloseable {
         previous.clear()
     }
 
+    fun resetMotion() {
+        previous.clear()
+    }
+
     fun clear() {
         homography?.release()
         homography = null
