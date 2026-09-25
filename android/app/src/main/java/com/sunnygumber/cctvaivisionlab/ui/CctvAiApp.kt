@@ -191,6 +191,45 @@ fun CctvAiApp(
                         }
                     }
 
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("CPU hybrid tracking", style = MaterialTheme.typography.labelLarge)
+                            Text(
+                                "OpenCV KLT tracks objects between AI refreshes without GPU/NPU inference.",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        Switch(
+                            checked = state.cpuHybridEnabled,
+                            onCheckedChange = viewModel::setCpuHybridEnabled,
+                        )
+                    }
+
+                    if (state.cpuHybridEnabled) {
+                        Text("AI detector refresh", style = MaterialTheme.typography.labelLarge)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            listOf(750L to "0.75 s", 1_500L to "1.5 s", 3_000L to "3.0 s")
+                                .forEach { (milliseconds, label) ->
+                                    ModeButton(
+                                        label = label,
+                                        selected = state.detectorRefreshMs == milliseconds,
+                                        onClick = { viewModel.setDetectorRefresh(milliseconds) },
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
+                        }
+                        Text(
+                            "Between detector refreshes, bounding boxes and track IDs are propagated on CPU using sparse optical flow.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+
                     Text("Detector model", style = MaterialTheme.typography.labelLarge)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
