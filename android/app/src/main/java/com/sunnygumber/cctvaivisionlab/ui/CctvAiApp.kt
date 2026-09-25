@@ -6,6 +6,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -38,6 +39,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -47,7 +49,9 @@ import com.sunnygumber.cctvaivisionlab.camera.CameraPreview
 import com.sunnygumber.cctvaivisionlab.core.InferenceMetrics
 import com.sunnygumber.cctvaivisionlab.core.ModelState
 import com.sunnygumber.cctvaivisionlab.core.ModelStatus
+import com.sunnygumber.cctvaivisionlab.tracking.FramePoint
 import java.util.Locale
+import kotlin.math.min
 
 private val focusClasses = setOf(0, 1, 2, 3, 5, 7)
 
@@ -100,11 +104,11 @@ fun CctvAiApp(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                text = "Native Android AI · v0.3 optimization",
+                text = "Native Android AI · v0.4 CPU hybrid",
                 style = MaterialTheme.typography.headlineSmall,
             )
             Text(
-                text = "CameraX + native ONNX Runtime · NNAPI first, CPU fallback",
+                text = "OpenCV CPU optical flow + periodic ONNX AI · optional metric ground-plane localization",
                 style = MaterialTheme.typography.bodyMedium,
             )
 
@@ -135,6 +139,7 @@ fun CctvAiApp(
                 cameraGranted = cameraGranted,
                 requestCamera = { cameraPermission.launch(Manifest.permission.CAMERA) },
                 onImage = viewModel::onCameraImage,
+                onCalibrationTap = viewModel::addMetricCalibrationPoint,
             )
 
             if (state.sourceMode == SourceMode.IMAGE) {
@@ -184,6 +189,45 @@ fun CctvAiApp(
                                 },
                             )
                         }
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("CPU hybrid tracking", style = MaterialTheme.typography.labelLarge)
+                            Text(
+                                "OpenCV KLT tracks objects between AI refreshes without GPU/NPU inference.",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        Switch(
+                            checked = state.cpuHybridEnabled,
+                            onCheckedChange = viewModel::setCpuHybridEnabled,
+                        )
+                    }
+
+                    if (state.cpuHybridEnabled) {
+                        Text("AI detector refresh", style = MaterialTheme.typography.labelLarge)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            listOf(750L to "0.75 s", 1_500L to "1.5 s", 3_000L to "3.0 s")
+                                .forEach { (milliseconds, label) ->
+                                    ModeButton(
+                                        label = label,
+                                        selected = state.detectorRefreshMs == milliseconds,
+                                        onClick = { viewModel.setDetectorRefresh(milliseconds) },
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
+                        }
+                        Text(
+                            "Between detector refreshes, bounding boxes and track IDs are propagated on CPU using sparse optical flow.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                     }
 
                     Text("Detector model", style = MaterialTheme.typography.labelLarge)
@@ -279,6 +323,13 @@ fun CctvAiApp(
                 }
             }
 
+            MetricCalibrationCard(
+                state = state,
+                setWidth = viewModel::setMetricGroundWidth,
+                setDepth = viewModel::setMetricGroundDepth,
+                startCalibration = viewModel::startMetricCalibration,
+                clearCalibration = viewModel::clearMetricCalibration,
+            )
             PerformanceCard(state)
             ModelCard(state, viewModel::clearAndRedownloadModels)
             RelationCard(state)
@@ -310,12 +361,45 @@ private fun VisionSurface(
     cameraGranted: Boolean,
     requestCamera: () -> Unit,
     onImage: (androidx.camera.core.ImageProxy, Boolean) -> Unit,
+    onCalibrationTap: (FramePoint) -> Unit,
 ) {
+    val calibrationModifier = if (
+        state.metricCalibrationMode &&
+        state.frameWidth > 0 &&
+        state.frameHeight > 0
+    ) {
+        Modifier.pointerInput(
+            state.metricCalibrationMode,
+            state.frameWidth,
+            state.frameHeight,
+        ) {
+            detectTapGestures { tap ->
+                val frameWidth = state.frameWidth.toFloat()
+                val frameHeight = state.frameHeight.toFloat()
+                val scale = min(
+                    size.width.toFloat() / frameWidth,
+                    size.height.toFloat() / frameHeight,
+                )
+                val offsetX = (size.width - frameWidth * scale) / 2f
+                val offsetY = (size.height - frameHeight * scale) / 2f
+                val frameX = (tap.x - offsetX) / scale
+                val frameY = (tap.y - offsetY) / scale
+
+                if (frameX in 0f..frameWidth && frameY in 0f..frameHeight) {
+                    onCalibrationTap(FramePoint(frameX, frameY))
+                }
+            }
+        }
+    } else {
+        Modifier
+    }
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .aspectRatio(16f / 9f)
-            .background(Color.Black),
+            .background(Color.Black)
+            .then(calibrationModifier),
         contentAlignment = Alignment.Center,
     ) {
         when (state.sourceMode) {
@@ -353,9 +437,95 @@ private fun VisionSurface(
             frameHeight = state.frameHeight,
             detections = detections,
             relations = state.relations,
-            showDetections = state.debugOverlay || !state.sceneEnabled,
+            showDetections = state.debugOverlay || !state.sceneEnabled || state.metricReady,
+            calibrationPoints = state.metricCalibrationPoints,
+            metricTracks = state.metricTracks,
             modifier = Modifier.fillMaxSize(),
         )
+    }
+}
+
+@Composable
+private fun MetricCalibrationCard(
+    state: CctvAiUiState,
+    setWidth: (Float) -> Unit,
+    setDepth: (Float) -> Unit,
+    startCalibration: () -> Unit,
+    clearCalibration: () -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Single-camera metric localization", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "For a fixed CCTV camera, map the ground plane to meters using one known rectangular area. " +
+                    "This calibration is CPU-only and must be repeated if the camera position changes.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+
+            MeterSlider(
+                label = "Known ground width",
+                value = state.metricGroundWidthMeters,
+                onValueChange = setWidth,
+                range = 1f..20f,
+            )
+            MeterSlider(
+                label = "Known ground depth",
+                value = state.metricGroundDepthMeters,
+                onValueChange = setDepth,
+                range = 1f..30f,
+            )
+
+            if (state.metricCalibrationMode) {
+                Text(
+                    "Tap ground corners on the video in this order: top-left → top-right → bottom-right → bottom-left. " +
+                        "Saved: ${state.metricCalibrationPoints.size}/4",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                OutlinedButton(
+                    onClick = clearCalibration,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Cancel calibration")
+                }
+            } else {
+                Button(
+                    onClick = startCalibration,
+                    enabled = state.sourceMode == SourceMode.CAMERA,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (state.metricReady) "Recalibrate metric ground plane" else "Start 4-point calibration")
+                }
+            }
+
+            MetricLine(
+                "Metric state",
+                if (state.metricReady) "READY" else if (state.metricCalibrationMode) "CALIBRATING" else "not calibrated",
+            )
+
+            if (state.metricReady) {
+                if (state.metricTracks.isEmpty()) {
+                    Text("Waiting for tracked objects on the calibrated ground plane.")
+                } else {
+                    state.metricTracks.take(6).forEach { track ->
+                        Text(
+                            String.format(
+                                Locale.US,
+                                "#%d %s · x %.2fm · y %.2fm · %.2fm/s",
+                                track.trackId,
+                                track.label,
+                                track.xMeters,
+                                track.yMeters,
+                                track.speedMetersPerSecond,
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -367,13 +537,23 @@ private fun PerformanceCard(state: CctvAiUiState) {
             verticalArrangement = Arrangement.spacedBy(7.dp),
         ) {
             Text("Performance", style = MaterialTheme.typography.titleMedium)
-            MetricLine("Detections", state.detections.size.toString())
-            MetricLine("Active tracks", state.activeTracks.toString())
+            MetricLine("Detections / tracks", "${state.detections.size} / ${state.activeTracks}")
+            MetricLine("AI detector updates", state.detectorUpdates.toString())
+            MetricLine("AI refresh target", if (state.cpuHybridEnabled) formatCadence(state.detectorRefreshMs) else "continuous")
             MetricLine("Relation candidates", state.relationCandidateCount.toString())
             MetricLine("Relationships", state.relations.size.toString())
             MetricLine("Relation updates", state.relationUpdates.toString())
-            MetricLine("Effective cadence", formatCadence(state.effectiveRelationCadenceMs))
-            MetricsBlock("Detector", state.detectorMetrics)
+            MetricLine("Effective relation cadence", formatCadence(state.effectiveRelationCadenceMs))
+
+            HorizontalDivider()
+            Text("CPU optical-flow tracker", style = MaterialTheme.typography.labelLarge)
+            MetricLine("Mode", if (state.cpuHybridEnabled) "OpenCV KLT · CPU" else "disabled")
+            MetricLine("Tracking update", formatMs(state.cpuTrackingMetrics.processingMs))
+            MetricLine("Tracked objects", state.cpuTrackingMetrics.trackedObjects.toString())
+            MetricLine("Feature points", state.cpuTrackingMetrics.trackedPoints.toString())
+            MetricLine("CPU flow updates", state.cpuTrackingMetrics.updates.toString())
+
+            MetricsBlock("Detector AI", state.detectorMetrics)
             HorizontalDivider()
             Text("Detector benchmark", style = MaterialTheme.typography.labelLarge)
             MetricLine("Active model", state.detectorProfile.displayName)
@@ -385,7 +565,7 @@ private fun PerformanceCard(state: CctvAiUiState) {
                 "Small 640 last",
                 state.smallLastInferenceMs?.let(::formatMs) ?: "not tested",
             )
-            MetricsBlock("Relation", state.relationMetrics)
+            MetricsBlock("Relation AI", state.relationMetrics)
         }
     }
 }
@@ -490,6 +670,26 @@ private fun LabeledSlider(
         Row(modifier = Modifier.fillMaxWidth()) {
             Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
             Text("${(value * 100).toInt()}%")
+        }
+        Slider(
+            value = value,
+            onValueChange = onValueChange,
+            valueRange = range,
+        )
+    }
+}
+
+@Composable
+private fun MeterSlider(
+    label: String,
+    value: Float,
+    onValueChange: (Float) -> Unit,
+    range: ClosedFloatingPointRange<Float>,
+) {
+    Column {
+        Row(modifier = Modifier.fillMaxWidth()) {
+            Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
+            Text(String.format(Locale.US, "%.1f m", value))
         }
         Slider(
             value = value,

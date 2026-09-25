@@ -1,4 +1,4 @@
-# CCTV AI Vision Lab — Native Android v0.3
+# CCTV AI Vision Lab — Native Android v0.4
 
 The Android application is a native implementation of the browser CCTV AI lab. It uses CameraX for live capture and ONNX Runtime Android for local inference.
 
@@ -7,28 +7,33 @@ The Android application is a native implementation of the browser CCTV AI lab. I
 ```text
 CameraX / selected image
         |
-        v
-YOLOX Nano 416 OR YOLOX Small 640
-NNAPI first -> CPU fallback
+        +--> OpenCV grayscale/KLT optical flow on CPU (continuous)
+        |        |
+        |        v
+        |   propagated boxes + stable IDs
+        |
+        +--> periodic YOLOX Nano 416 / Small 640 refresh
+                 |
+                 v
+          detector correction + dedupe
+                 |
+                 v
+          top-5 scene candidates
+                 |
+                 v
+          RelateAnything 448x448
+                 |
+                 v
+       validated relation overlay
+
+Optional fixed-camera calibration:
+4 image ground points + known width/depth
         |
         v
-duplicate suppression
+planar homography
         |
         v
-IoU tracking
-        |
-        v
-stable, person-prioritized top-5 objects
-        |
-        v
-RelateAnything 448x448
-NNAPI first -> CPU fallback
-        |
-        v
-temporal relation smoothing
-        |
-        v
-Compose overlay + metrics
+track position / movement / speed in meters
 ```
 
 The relation stage receives clean RGB pixels and box coordinates. Detector rectangles are not burned into the image given to RelateAnything.
@@ -121,3 +126,32 @@ A successful CI build proves the Android project compiles, but it cannot validat
 11. Run live AI for at least 10 minutes and observe latency/thermal behavior.
 
 See the repository-level `ANDROID_APP_PLAN.md` for complete acceptance criteria.
+
+
+## v0.4 CPU hybrid mode
+
+The continuous tracking path no longer requires the neural detector on every analysed camera frame. OpenCV 4.14 sparse pyramidal Lucas-Kanade optical flow tracks feature points inside existing detector boxes on the CPU. YOLOX is used periodically to correct drift, discover new objects and refresh object classes.
+
+Default hybrid settings:
+
+- CPU optical-flow tracking: enabled
+- YOLOX Nano 416: default detector
+- detector AI refresh: 1.5 seconds
+- relation AI requested cadence: 3 seconds
+- RelateAnything: maximum 5 relevant objects
+
+The Performance panel reports CPU optical-flow update time, tracked feature points, AI detector update count, and neural-model inference time separately. This makes it possible to verify that most intermediate frames are handled without NNAPI/GPU/NPU inference.
+
+## Metric ground-plane localization
+
+For a fixed CCTV camera, v0.4 can convert image positions into approximate real-world meters on a calibrated ground plane.
+
+1. Keep the camera physically fixed.
+2. Identify a rectangular floor/ground area whose real width and depth are known.
+3. Enter those dimensions in the app.
+4. Tap its corners in order: top-left, top-right, bottom-right, bottom-left.
+5. The app computes a perspective homography from image pixels to ground-plane meters.
+6. Tracked objects use the bottom-center of their bounding box as the ground contact point.
+7. The app reports X/Y position and inter-frame speed in meters/second.
+
+This is planar metric localization, not general 3D depth estimation. Results are only meaningful on the calibrated ground plane, and calibration must be repeated if the camera position, zoom or view changes.

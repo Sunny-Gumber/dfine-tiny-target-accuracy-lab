@@ -6,10 +6,16 @@ import java.util.concurrent.atomic.AtomicLong
 class DefaultFrameScheduler : FrameScheduler {
     private val detectorBusy = AtomicBoolean(false)
     private val relationBusy = AtomicBoolean(false)
+    private val lastDetectorNs = AtomicLong(0L)
     private val lastRelationNs = AtomicLong(0L)
 
-    override fun shouldRunDetector(timestampNs: Long): Boolean =
-        !detectorBusy.get() && !relationBusy.get()
+    override fun shouldRunDetector(timestampNs: Long, detectorCadenceMs: Long): Boolean {
+        if (detectorBusy.get() || relationBusy.get()) return false
+        val previous = lastDetectorNs.get()
+        return detectorCadenceMs <= 0L ||
+            previous == 0L ||
+            timestampNs - previous >= detectorCadenceMs * 1_000_000L
+    }
 
     override fun shouldRunRelation(timestampNs: Long, relationCadenceMs: Long): Boolean {
         if (relationBusy.get()) return false
@@ -19,6 +25,7 @@ class DefaultFrameScheduler : FrameScheduler {
 
     override fun markDetectorStarted(timestampNs: Long) {
         detectorBusy.set(true)
+        lastDetectorNs.set(timestampNs)
     }
 
     override fun markDetectorFinished(timestampNs: Long) {
@@ -37,6 +44,7 @@ class DefaultFrameScheduler : FrameScheduler {
     override fun reset() {
         detectorBusy.set(false)
         relationBusy.set(false)
+        lastDetectorNs.set(0L)
         lastRelationNs.set(0L)
     }
 }

@@ -9,6 +9,8 @@ import androidx.camera.core.ImageProxy
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.sunnygumber.cctvaivisionlab.camera.FrameConverter
+import com.sunnygumber.cctvaivisionlab.camera.GrayFrame
+import com.sunnygumber.cctvaivisionlab.camera.GrayFrameConverter
 import com.sunnygumber.cctvaivisionlab.core.DefaultFrameScheduler
 import com.sunnygumber.cctvaivisionlab.core.Detection
 import com.sunnygumber.cctvaivisionlab.core.FrameData
@@ -21,7 +23,12 @@ import com.sunnygumber.cctvaivisionlab.inference.RelateAnythingEngine
 import com.sunnygumber.cctvaivisionlab.inference.YoloXDetector
 import com.sunnygumber.cctvaivisionlab.models.LocalModelManager
 import com.sunnygumber.cctvaivisionlab.models.ModelCatalog
+import com.sunnygumber.cctvaivisionlab.tracking.CpuOpticalFlowTracker
+import com.sunnygumber.cctvaivisionlab.tracking.CpuTrackingMetrics
+import com.sunnygumber.cctvaivisionlab.tracking.FramePoint
+import com.sunnygumber.cctvaivisionlab.tracking.GroundPlaneMetricTracker
 import com.sunnygumber.cctvaivisionlab.tracking.IoUTracker
+import com.sunnygumber.cctvaivisionlab.tracking.MetricTrackState
 import com.sunnygumber.cctvaivisionlab.tracking.RelationPolicy
 import com.sunnygumber.cctvaivisionlab.tracking.RelationSmoother
 import com.sunnygumber.cctvaivisionlab.tracking.deduplicateDetections
@@ -62,9 +69,11 @@ data class CctvAiUiState(
     val lensFacing: Int = CameraSelector.LENS_FACING_BACK,
     val aiEnabled: Boolean = true,
     val sceneEnabled: Boolean = false,
+    val cpuHybridEnabled: Boolean = true,
+    val detectorRefreshMs: Long = 1_500L,
     val debugOverlay: Boolean = false,
     val displayFilter: DisplayFilter = DisplayFilter.ALL,
-    val detectorProfile: DetectorProfile = DetectorProfile.ACCURATE_SMALL,
+    val detectorProfile: DetectorProfile = DetectorProfile.FAST_NANO,
     val detectorThreshold: Float = 0.55f,
     val relationThreshold: Float = 0.55f,
     val relationCadenceMs: Long = 3_000L,
@@ -74,8 +83,10 @@ data class CctvAiUiState(
     val relationCandidateCount: Int = 0,
     val activeTracks: Int = 0,
     val relationUpdates: Int = 0,
+    val detectorUpdates: Int = 0,
     val detectorMetrics: InferenceMetrics? = null,
     val relationMetrics: InferenceMetrics? = null,
+    val cpuTrackingMetrics: CpuTrackingMetrics = CpuTrackingMetrics(),
     val nanoLastInferenceMs: Double? = null,
     val smallLastInferenceMs: Double? = null,
     val detectorModel: ModelStatus? = null,
@@ -86,6 +97,12 @@ data class CctvAiUiState(
     val frameWidth: Int = 0,
     val frameHeight: Int = 0,
     val selectedBitmap: Bitmap? = null,
+    val metricCalibrationMode: Boolean = false,
+    val metricCalibrationPoints: List<FramePoint> = emptyList(),
+    val metricGroundWidthMeters: Float = 6f,
+    val metricGroundDepthMeters: Float = 8f,
+    val metricReady: Boolean = false,
+    val metricTracks: List<MetricTrackState> = emptyList(),
     val status: String = "Preparing detector model…",
     val error: String? = null,
 )
@@ -93,10 +110,13 @@ data class CctvAiUiState(
 class CctvAiViewModel(application: Application) : AndroidViewModel(application) {
     private val modelManager = LocalModelManager(application)
     private val tracker = IoUTracker()
+    private val cpuTracker = CpuOpticalFlowTracker()
+    private val metricTracker = GroundPlaneMetricTracker()
     private val smoother = RelationSmoother()
     private val scheduler = DefaultFrameScheduler()
     private val detectorMutex = Mutex()
     private val detectorGeneration = AtomicInteger(0)
+    private val relationStateLock = Any()
 
     @Volatile
     private var detector: YoloXDetector? = null
@@ -122,6 +142,7 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
             CameraSelector.LENS_FACING_BACK
         }
         resetLiveState()
+        clearMetricCalibration()
         _state.value = _state.value.copy(lensFacing = next)
     }
 
@@ -137,6 +158,26 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
         prepareDetector(profile)
     }
 
+    fun setCpuHybridEnabled(enabled: Boolean) {
+        cpuTracker.reset()
+        metricTracker.resetMotion()
+        _state.value = _state.value.copy(
+            cpuHybridEnabled = enabled,
+            cpuTrackingMetrics = CpuTrackingMetrics(),
+            metricTracks = emptyList(),
+            status = if (enabled) {
+                "CPU optical-flow tracking enabled. AI detector is now periodic."
+            } else {
+                "CPU tracking disabled. AI detector runs whenever hardware is available."
+            },
+        )
+    }
+
+    fun setDetectorRefresh(valueMs: Long) {
+        _state.value = _state.value.copy(detectorRefreshMs = valueMs)
+        scheduler.reset()
+    }
+
     fun setAiEnabled(enabled: Boolean) {
         if (!enabled) {
             resetLiveState()
@@ -150,14 +191,20 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setSceneEnabled(enabled: Boolean) {
         if (!enabled) {
-            smoother.reset()
-            currentRelations = emptyList()
+            synchronized(relationStateLock) {
+                smoother.reset()
+                currentRelations = emptyList()
+            }
             _state.value = _state.value.copy(
                 sceneEnabled = false,
                 relations = emptyList(),
                 relationCandidateCount = 0,
                 relationUpdates = 0,
-                status = "Object AI active.",
+                status = if (_state.value.cpuHybridEnabled) {
+                    "CPU tracking + object AI active."
+                } else {
+                    "Object AI active."
+                },
             )
             return
         }
@@ -199,24 +246,132 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
         )
     }
 
-    fun onCameraImage(image: ImageProxy, mirrored: Boolean) {
+    fun setMetricGroundWidth(valueMeters: Float) {
+        _state.value = _state.value.copy(metricGroundWidthMeters = valueMeters)
+    }
+
+    fun setMetricGroundDepth(valueMeters: Float) {
+        _state.value = _state.value.copy(metricGroundDepthMeters = valueMeters)
+    }
+
+    fun startMetricCalibration() {
+        metricTracker.clear()
+        _state.value = _state.value.copy(
+            metricCalibrationMode = true,
+            metricCalibrationPoints = emptyList(),
+            metricReady = false,
+            metricTracks = emptyList(),
+            status = "Metric calibration: tap 4 ground corners TL → TR → BR → BL.",
+        )
+    }
+
+    fun addMetricCalibrationPoint(point: FramePoint) {
         val snapshot = _state.value
-        if (!snapshot.aiEnabled || detector == null) return
+        if (!snapshot.metricCalibrationMode) return
+        if (snapshot.frameWidth <= 0 || snapshot.frameHeight <= 0) return
+
+        val clamped = FramePoint(
+            x = point.x.coerceIn(0f, snapshot.frameWidth.toFloat()),
+            y = point.y.coerceIn(0f, snapshot.frameHeight.toFloat()),
+        )
+        val points = (snapshot.metricCalibrationPoints + clamped).take(4)
+
+        if (points.size < 4) {
+            _state.value = snapshot.copy(
+                metricCalibrationPoints = points,
+                status = "Metric calibration: point ${points.size}/4 saved.",
+            )
+            return
+        }
+
+        try {
+            metricTracker.configure(
+                imagePoints = points,
+                widthMeters = snapshot.metricGroundWidthMeters.toDouble(),
+                depthMeters = snapshot.metricGroundDepthMeters.toDouble(),
+            )
+            _state.value = snapshot.copy(
+                metricCalibrationMode = false,
+                metricCalibrationPoints = points,
+                metricReady = true,
+                metricTracks = emptyList(),
+                status = "Metric ground plane calibrated. Positions are now reported in meters.",
+                error = null,
+            )
+        } catch (error: Throwable) {
+            metricTracker.clear()
+            setError("Metric calibration failed: ${error.message}")
+        }
+    }
+
+    fun clearMetricCalibration() {
+        metricTracker.clear()
+        _state.value = _state.value.copy(
+            metricCalibrationMode = false,
+            metricCalibrationPoints = emptyList(),
+            metricReady = false,
+            metricTracks = emptyList(),
+        )
+    }
+
+    fun onCameraImage(image: ImageProxy, mirrored: Boolean) {
+        val initial = _state.value
+        if (!initial.aiEnabled) return
 
         val timestamp = image.imageInfo.timestamp
-        if (!scheduler.shouldRunDetector(timestamp)) return
+        var grayFrame: GrayFrame? = null
+
+        if (initial.cpuHybridEnabled || initial.metricCalibrationMode || initial.metricReady) {
+            try {
+                grayFrame = GrayFrameConverter.fromImageProxy(
+                    image = image,
+                    mirrorHorizontally = mirrored,
+                )
+                if (initial.cpuHybridEnabled) {
+                    val cpuResult = cpuTracker.update(grayFrame)
+                    applyCpuTrackingResult(cpuResult.detections, cpuResult.metrics, timestamp)
+                }
+            } catch (error: Throwable) {
+                _state.value = _state.value.copy(
+                    error = "CPU tracker unavailable: ${error.message}",
+                    status = "CPU tracker failed; AI detector can continue.",
+                )
+            }
+        }
+
+        if (detector == null) {
+            grayFrame?.close()
+            return
+        }
+
+        val snapshot = _state.value
+        val detectorCadence = if (snapshot.cpuHybridEnabled) snapshot.detectorRefreshMs else 0L
+        if (!scheduler.shouldRunDetector(timestamp, detectorCadence)) {
+            grayFrame?.close()
+            return
+        }
+
         scheduler.markDetectorStarted(timestamp)
+        val detectorGray = grayFrame?.copy()
 
         val frame = try {
             FrameConverter.fromImageProxy(image, mirrorHorizontally = mirrored)
         } catch (error: Throwable) {
+            detectorGray?.close()
+            grayFrame?.close()
             scheduler.markDetectorFinished(timestamp)
             setError("Camera frame conversion failed: ${error.message}")
             return
+        } finally {
+            grayFrame?.close()
         }
 
         viewModelScope.launch(Dispatchers.Default) {
-            processFrame(frame, live = true)
+            processFrame(
+                frame = frame,
+                live = true,
+                detectorGray = detectorGray,
+            )
         }
     }
 
@@ -235,7 +390,7 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 val frame = FrameConverter.fromBitmap(bitmap)
                 _state.value = _state.value.copy(selectedBitmap = bitmap)
-                processFrame(frame, live = false)
+                processFrame(frame = frame, live = false, detectorGray = null)
             } catch (error: Throwable) {
                 setError("Could not analyse image: ${error.message}")
             }
@@ -403,7 +558,11 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private suspend fun processFrame(frame: FrameData, live: Boolean) {
+    private suspend fun processFrame(
+        frame: FrameData,
+        live: Boolean,
+        detectorGray: GrayFrame?,
+    ) {
         var relationCandidates: List<Detection> = emptyList()
         var runRelation = false
 
@@ -414,10 +573,34 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
             } ?: return
 
             val deduplicated = deduplicateDetections(detectionResult.detections)
-            val tracked = if (live) tracker.update(deduplicated) else deduplicated
+            val detectorTracked = if (live) tracker.update(deduplicated) else deduplicated
 
-            if (live) {
-                currentRelations = smoother.resolveBoxes(currentRelations, tracked)
+            val displayDetections = if (
+                live &&
+                snapshot.cpuHybridEnabled &&
+                detectorGray != null
+            ) {
+                val corrected = cpuTracker.correctFromDetector(
+                    detectorFrame = detectorGray,
+                    detections = detectorTracked,
+                )
+                _state.value = _state.value.copy(cpuTrackingMetrics = corrected.metrics)
+                corrected.detections.ifEmpty { detectorTracked }
+            } else {
+                detectorTracked
+            }
+
+            val metricTimestamp = if (live && snapshot.cpuHybridEnabled) {
+                cpuTracker.latestTimestampNs().takeIf { it > 0L } ?: frame.timestampNs
+            } else {
+                frame.timestampNs
+            }
+            val metricTracks = updateMetricTracks(displayDetections, metricTimestamp)
+
+            val resolvedRelations = synchronized(relationStateLock) {
+                val resolved = smoother.resolveBoxes(currentRelations, displayDetections)
+                currentRelations = resolved
+                resolved
             }
 
             val effectiveCadence = calculateEffectiveCadence(
@@ -435,20 +618,26 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             _state.value = benchmarkState.copy(
-                detections = tracked,
-                relations = currentRelations,
+                detections = displayDetections,
+                relations = resolvedRelations,
                 activeTracks = if (live) tracker.activeTrackCount else 0,
+                detectorUpdates = snapshot.detectorUpdates + 1,
                 detectorMetrics = detectionResult.metrics,
                 effectiveRelationCadenceMs = effectiveCadence,
                 frameWidth = frame.width,
                 frameHeight = frame.height,
-                status = if (snapshot.sceneEnabled) "Live Scene AI active." else "Object AI active.",
+                metricTracks = metricTracks,
+                status = when {
+                    snapshot.sceneEnabled -> "Hybrid Scene AI active."
+                    snapshot.cpuHybridEnabled -> "CPU tracking + periodic object AI active."
+                    else -> "Object AI active."
+                },
                 error = null,
             )
 
             val relation = relationEngine
             if (snapshot.sceneEnabled && relation != null) {
-                relationCandidates = selectRelationCandidates(tracked, live)
+                relationCandidates = selectRelationCandidates(detectorTracked, live)
                 _state.value = _state.value.copy(relationCandidateCount = relationCandidates.size)
 
                 if (relationCandidates.size >= 2) {
@@ -463,6 +652,7 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
         } catch (error: Throwable) {
             setError("Detector inference failed: ${error.message}")
         } finally {
+            detectorGray?.close()
             if (live) scheduler.markDetectorFinished(frame.timestampNs)
         }
 
@@ -484,14 +674,28 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
                 relations = relationResult.relations,
                 maxRelations = 3,
             )
-            val stable = if (live) {
-                smoother.update(plausible)
-            } else {
-                plausible
+
+            val stable = synchronized(relationStateLock) {
+                val smoothed = if (live) {
+                    smoother.update(plausible)
+                } else {
+                    plausible
+                }
+                val latest = if (live && _state.value.cpuHybridEnabled) {
+                    cpuTracker.currentDetections()
+                } else {
+                    emptyList()
+                }
+                val resolved = if (latest.isNotEmpty()) {
+                    smoother.resolveBoxes(smoothed, latest)
+                } else {
+                    smoothed
+                }
+                currentRelations = resolved
+                resolved
             }
 
             if (!live || _state.value.sceneEnabled) {
-                currentRelations = stable
                 val snapshot = _state.value
                 val effectiveCadence = calculateEffectiveCadence(
                     requestedMs = snapshot.relationCadenceMs,
@@ -504,9 +708,9 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
                     effectiveRelationCadenceMs = effectiveCadence,
                     relationUpdates = snapshot.relationUpdates + 1,
                     status = if (stable.isEmpty()) {
-                        "Scene AI active · no plausible relationship crossed the threshold."
+                        "Hybrid Scene AI active · no plausible relationship crossed the threshold."
                     } else {
-                        "Scene AI active · ${stable.size} validated relationship(s)."
+                        "Hybrid Scene AI active · ${stable.size} validated relationship(s)."
                     },
                     error = null,
                 )
@@ -517,6 +721,47 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
             if (live) scheduler.markRelationFinished(System.nanoTime())
         }
     }
+
+    private fun applyCpuTrackingResult(
+        detections: List<Detection>,
+        metrics: CpuTrackingMetrics,
+        timestampNs: Long,
+    ) {
+        if (detections.isEmpty()) {
+            _state.value = _state.value.copy(cpuTrackingMetrics = metrics)
+            return
+        }
+
+        val relations = synchronized(relationStateLock) {
+            val resolved = smoother.resolveBoxes(currentRelations, detections)
+            currentRelations = resolved
+            resolved
+        }
+        val metricTracks = updateMetricTracks(detections, timestampNs)
+
+        val snapshot = _state.value
+        _state.value = snapshot.copy(
+            detections = detections,
+            relations = relations,
+            activeTracks = detections.size,
+            cpuTrackingMetrics = metrics,
+            metricTracks = metricTracks,
+            frameWidth = detections.maxOfOrNull { it.box.right.toInt() }?.coerceAtLeast(snapshot.frameWidth)
+                ?: snapshot.frameWidth,
+            frameHeight = detections.maxOfOrNull { it.box.bottom.toInt() }?.coerceAtLeast(snapshot.frameHeight)
+                ?: snapshot.frameHeight,
+        )
+    }
+
+    private fun updateMetricTracks(
+        detections: List<Detection>,
+        timestampNs: Long,
+    ): List<MetricTrackState> =
+        if (metricTracker.isCalibrated) {
+            metricTracker.update(detections, timestampNs)
+        } else {
+            emptyList()
+        }
 
     private fun selectRelationCandidates(
         detections: List<Detection>,
@@ -583,8 +828,12 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
     private fun resetLiveState() {
         scheduler.reset()
         tracker.reset()
-        smoother.reset()
-        currentRelations = emptyList()
+        cpuTracker.reset()
+        metricTracker.resetMotion()
+        synchronized(relationStateLock) {
+            smoother.reset()
+            currentRelations = emptyList()
+        }
         val snapshot = _state.value
         _state.value = snapshot.copy(
             detections = emptyList(),
@@ -592,8 +841,11 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
             relationCandidateCount = 0,
             activeTracks = 0,
             relationUpdates = 0,
+            detectorUpdates = 0,
             detectorMetrics = null,
             relationMetrics = null,
+            cpuTrackingMetrics = CpuTrackingMetrics(),
+            metricTracks = emptyList(),
             effectiveRelationCadenceMs = snapshot.relationCadenceMs,
         )
     }
@@ -622,6 +874,8 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
             }
             runCatching { relationEngine?.close() }
         }
+        cpuTracker.close()
+        metricTracker.close()
         super.onCleared()
     }
 
