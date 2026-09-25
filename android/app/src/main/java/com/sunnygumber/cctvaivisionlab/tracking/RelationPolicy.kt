@@ -19,7 +19,7 @@ object RelationPolicy {
     )
     private val personLedPredicates = setOf(
         "wearing", "riding", "sitting on", "holding", "looking at", "using",
-        "standing on", "carrying", "walking past", "leaning against",
+        "standing on", "carrying", "standing beside", "walking past", "leaning against",
     )
     private val actionPredicates = setOf(
         "wearing", "riding", "sitting on", "holding", "using", "carrying",
