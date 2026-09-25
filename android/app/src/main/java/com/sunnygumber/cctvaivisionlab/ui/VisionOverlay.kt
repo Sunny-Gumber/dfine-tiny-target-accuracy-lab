@@ -59,7 +59,7 @@ fun VisionOverlay(
             }
         }
 
-        relations.take(6).forEach { relation ->
+        relations.take(3).forEach { relation ->
             val start = point(relation.subject.box.centerX, relation.subject.box.centerY)
             val end = point(relation.objectDetection.box.centerX, relation.objectDetection.box.centerY)
             val relationColor = Color(0xFFFFAD66)

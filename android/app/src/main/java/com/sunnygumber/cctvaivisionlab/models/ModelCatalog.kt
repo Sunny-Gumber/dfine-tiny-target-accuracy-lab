@@ -3,6 +3,13 @@ package com.sunnygumber.cctvaivisionlab.models
 import com.sunnygumber.cctvaivisionlab.core.ModelDescriptor
 
 object ModelCatalog {
+    val yoloXNano = ModelDescriptor(
+        id = "yolox-n",
+        fileName = "yolox_n.onnx",
+        url = "https://huggingface.co/LibreYOLO/libreyolo-web/resolve/main/yolox_n.onnx",
+        version = "libreyolo-web-main-yolox-n-v1",
+    )
+
     val yoloXSmall = ModelDescriptor(
         id = "yolox-s",
         fileName = "yolox_s.onnx",
@@ -24,5 +31,5 @@ object ModelCatalog {
         version = "relsgg-vits16plus-bank-main-v1",
     )
 
-    val all = listOf(yoloXSmall, relateAnything, predicateBank)
+    val all = listOf(yoloXNano, yoloXSmall, relateAnything, predicateBank)
 }

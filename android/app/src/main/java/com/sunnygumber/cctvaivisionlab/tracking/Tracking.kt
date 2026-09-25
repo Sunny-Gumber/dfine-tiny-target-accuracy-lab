@@ -4,6 +4,7 @@ import com.sunnygumber.cctvaivisionlab.core.BoundingBox
 import com.sunnygumber.cctvaivisionlab.core.Detection
 import com.sunnygumber.cctvaivisionlab.core.SceneRelation
 import com.sunnygumber.cctvaivisionlab.core.Tracker
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 
@@ -37,7 +38,7 @@ fun deduplicateDetections(
     val kept = ArrayList<Detection>()
     detections.sortedByDescending { it.confidence }.forEach { candidate ->
         val duplicate = kept.any { existing ->
-            existing.label == candidate.label &&
+            existing.classId == candidate.classId &&
                 (intersectionOverUnion(existing.box, candidate.box) >= iouThreshold ||
                     overlapOverSmallerArea(existing.box, candidate.box) >= containmentThreshold)
         }
@@ -51,11 +52,14 @@ private data class InternalTrack(
     var detection: Detection,
     var age: Int,
     var misses: Int,
+    var velocityX: Float = 0f,
+    var velocityY: Float = 0f,
 )
 
 class IoUTracker(
-    private val iouThreshold: Float = 0.28f,
-    private val maxMisses: Int = 8,
+    private val minimumIou: Float = 0.10f,
+    private val minimumMatchScore: Float = 0.34f,
+    private val maxMisses: Int = 6,
 ) : Tracker {
     private val tracks = ArrayList<InternalTrack>()
     private var nextId = 1
@@ -69,14 +73,15 @@ class IoUTracker(
             .forEach { detectionIndex ->
                 val detection = detections[detectionIndex]
                 var bestTrack = -1
-                var bestIou = iouThreshold
+                var bestScore = minimumMatchScore
 
                 unmatchedTracks.forEach { trackIndex ->
                     val track = tracks[trackIndex]
-                    if (track.detection.label != detection.label) return@forEach
-                    val iou = intersectionOverUnion(track.detection.box, detection.box)
-                    if (iou > bestIou) {
-                        bestIou = iou
+                    if (track.detection.classId != detection.classId) return@forEach
+
+                    val score = matchScore(track, detection)
+                    if (score > bestScore) {
+                        bestScore = score
                         bestTrack = trackIndex
                     }
                 }
@@ -89,23 +94,72 @@ class IoUTracker(
 
         unmatchedTracks.forEach { tracks[it].misses += 1 }
 
-        val output = detections.mapIndexed { index, detection ->
+        val output = detections.mapIndexed { index, rawDetection ->
             val matched = assignments[index]
             if (matched != null) {
                 val track = tracks[matched]
-                track.detection = detection
+                val oldBox = track.detection.box
+                val dx = rawDetection.box.centerX - oldBox.centerX
+                val dy = rawDetection.box.centerY - oldBox.centerY
+
+                track.velocityX = track.velocityX * 0.55f + dx * 0.45f
+                track.velocityY = track.velocityY * 0.55f + dy * 0.45f
+
+                val stabilized = rawDetection.copy(
+                    box = blendBoxes(oldBox, rawDetection.box, newWeight = 0.72f),
+                    trackId = track.id,
+                    trackAge = track.age + 1,
+                )
+                track.detection = stabilized
                 track.age += 1
                 track.misses = 0
-                detection.copy(trackId = track.id, trackAge = track.age)
+                stabilized
             } else {
-                val track = InternalTrack(nextId++, detection, age = 1, misses = 0)
-                tracks += track
-                detection.copy(trackId = track.id, trackAge = 1)
+                val tracked = rawDetection.copy(trackId = nextId, trackAge = 1)
+                tracks += InternalTrack(
+                    id = nextId,
+                    detection = tracked,
+                    age = 1,
+                    misses = 0,
+                )
+                nextId += 1
+                tracked
             }
         }
 
         tracks.removeAll { it.misses > maxMisses }
         return output
+    }
+
+    private fun matchScore(track: InternalTrack, detection: Detection): Float {
+        val predicted = shiftBox(
+            track.detection.box,
+            track.velocityX * (track.misses + 1),
+            track.velocityY * (track.misses + 1),
+        )
+        val candidate = detection.box
+        val iou = intersectionOverUnion(predicted, candidate)
+
+        val distance = hypot(
+            (predicted.centerX - candidate.centerX).toDouble(),
+            (predicted.centerY - candidate.centerY).toDouble(),
+        ).toFloat()
+        val scale = max(
+            max(predicted.width, candidate.width),
+            max(predicted.height, candidate.height),
+        ).coerceAtLeast(1f)
+        val centerScore = (1f - distance / (scale * 1.65f)).coerceIn(0f, 1f)
+
+        val largerArea = max(predicted.area, candidate.area).coerceAtLeast(1f)
+        val sizeScore = (min(predicted.area, candidate.area) / largerArea).coerceIn(0f, 1f)
+
+        if (iou < minimumIou && centerScore < 0.44f) return Float.NEGATIVE_INFINITY
+        if (sizeScore < 0.28f) return Float.NEGATIVE_INFINITY
+
+        return iou * 0.58f +
+            centerScore * 0.30f +
+            sizeScore * 0.12f -
+            track.misses * 0.025f
     }
 
     override fun reset() {
@@ -115,12 +169,29 @@ class IoUTracker(
 
     val activeTrackCount: Int
         get() = tracks.count { it.misses == 0 }
+
+    private fun shiftBox(box: BoundingBox, dx: Float, dy: Float) = BoundingBox(
+        left = box.left + dx,
+        top = box.top + dy,
+        right = box.right + dx,
+        bottom = box.bottom + dy,
+    )
+
+    private fun blendBoxes(old: BoundingBox, new: BoundingBox, newWeight: Float): BoundingBox {
+        val oldWeight = 1f - newWeight
+        return BoundingBox(
+            left = old.left * oldWeight + new.left * newWeight,
+            top = old.top * oldWeight + new.top * newWeight,
+            right = old.right * oldWeight + new.right * newWeight,
+            bottom = old.bottom * oldWeight + new.bottom * newWeight,
+        )
+    }
 }
 
 class RelationSmoother(
     private val emaWeight: Float = 0.62f,
     private val maxMisses: Int = 1,
-    private val maxRelations: Int = 8,
+    private val maxRelations: Int = 3,
 ) {
     private data class Entry(
         var relation: SceneRelation,

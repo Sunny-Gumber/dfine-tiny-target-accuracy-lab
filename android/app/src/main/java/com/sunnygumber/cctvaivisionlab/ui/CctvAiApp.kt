@@ -100,7 +100,7 @@ fun CctvAiApp(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                text = "Native Android AI",
+                text = "Native Android AI · v0.3 optimization",
                 style = MaterialTheme.typography.headlineSmall,
             )
             Text(
@@ -186,6 +186,29 @@ fun CctvAiApp(
                         }
                     }
 
+                    Text("Detector model", style = MaterialTheme.typography.labelLarge)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        ModeButton(
+                            label = "Fast Nano 416",
+                            selected = state.detectorProfile == DetectorProfile.FAST_NANO,
+                            onClick = { viewModel.setDetectorProfile(DetectorProfile.FAST_NANO) },
+                            modifier = Modifier.weight(1f),
+                        )
+                        ModeButton(
+                            label = "Small 640",
+                            selected = state.detectorProfile == DetectorProfile.ACCURATE_SMALL,
+                            onClick = { viewModel.setDetectorProfile(DetectorProfile.ACCURATE_SMALL) },
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    Text(
+                        "Use the same scene with both models and compare the last inference times below.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+
                     LabeledSlider(
                         label = "Detector confidence",
                         value = state.detectorThreshold,
@@ -199,7 +222,7 @@ fun CctvAiApp(
                         range = 0.30f..0.90f,
                     )
 
-                    Text("Relation cadence", style = MaterialTheme.typography.labelLarge)
+                    Text("Requested relation cadence", style = MaterialTheme.typography.labelLarge)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -214,6 +237,10 @@ fun CctvAiApp(
                                 )
                             }
                     }
+                    Text(
+                        "Adaptive effective cadence: ${formatCadence(state.effectiveRelationCadenceMs)}",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
 
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -342,9 +369,22 @@ private fun PerformanceCard(state: CctvAiUiState) {
             Text("Performance", style = MaterialTheme.typography.titleMedium)
             MetricLine("Detections", state.detections.size.toString())
             MetricLine("Active tracks", state.activeTracks.toString())
+            MetricLine("Relation candidates", state.relationCandidateCount.toString())
             MetricLine("Relationships", state.relations.size.toString())
             MetricLine("Relation updates", state.relationUpdates.toString())
+            MetricLine("Effective cadence", formatCadence(state.effectiveRelationCadenceMs))
             MetricsBlock("Detector", state.detectorMetrics)
+            HorizontalDivider()
+            Text("Detector benchmark", style = MaterialTheme.typography.labelLarge)
+            MetricLine("Active model", state.detectorProfile.displayName)
+            MetricLine(
+                "Nano 416 last",
+                state.nanoLastInferenceMs?.let(::formatMs) ?: "not tested",
+            )
+            MetricLine(
+                "Small 640 last",
+                state.smallLastInferenceMs?.let(::formatMs) ?: "not tested",
+            )
             MetricsBlock("Relation", state.relationMetrics)
         }
     }
@@ -375,7 +415,8 @@ private fun ModelCard(
             verticalArrangement = Arrangement.spacedBy(7.dp),
         ) {
             Text("Local AI models", style = MaterialTheme.typography.titleMedium)
-            ModelLine("YOLOX-S", state.detectorModel)
+            ModelLine("YOLOX Nano 416", state.nanoModel)
+            ModelLine("YOLOX Small 640", state.smallModel)
             ModelLine("RelateAnything", state.relationModel)
             ModelLine("Predicate bank", state.predicateBank)
             Text(
@@ -422,7 +463,7 @@ private fun RelationCard(state: CctvAiUiState) {
             if (state.relations.isEmpty()) {
                 Text("No relationship above the current threshold.")
             } else {
-                state.relations.take(8).forEach { relation ->
+                state.relations.take(3).forEach { relation ->
                     val subject = relation.subject.trackId?.let { "#$it ${relation.subject.label}" }
                         ?: relation.subject.label
                     val objectName = relation.objectDetection.trackId?.let {
@@ -479,6 +520,13 @@ private fun MetricLine(label: String, value: String) {
         Text(value, style = MaterialTheme.typography.bodySmall)
     }
 }
+
+private fun formatCadence(valueMs: Long): String =
+    if (valueMs % 1_000L == 0L) {
+        "${valueMs / 1_000L}.0 s"
+    } else {
+        String.format(Locale.US, "%.1f s", valueMs / 1_000.0)
+    }
 
 private fun formatMs(value: Double): String =
     if (value <= 0.0) {
