@@ -537,13 +537,23 @@ private fun PerformanceCard(state: CctvAiUiState) {
             verticalArrangement = Arrangement.spacedBy(7.dp),
         ) {
             Text("Performance", style = MaterialTheme.typography.titleMedium)
-            MetricLine("Detections", state.detections.size.toString())
-            MetricLine("Active tracks", state.activeTracks.toString())
+            MetricLine("Detections / tracks", "${state.detections.size} / ${state.activeTracks}")
+            MetricLine("AI detector updates", state.detectorUpdates.toString())
+            MetricLine("AI refresh target", if (state.cpuHybridEnabled) formatCadence(state.detectorRefreshMs) else "continuous")
             MetricLine("Relation candidates", state.relationCandidateCount.toString())
             MetricLine("Relationships", state.relations.size.toString())
             MetricLine("Relation updates", state.relationUpdates.toString())
-            MetricLine("Effective cadence", formatCadence(state.effectiveRelationCadenceMs))
-            MetricsBlock("Detector", state.detectorMetrics)
+            MetricLine("Effective relation cadence", formatCadence(state.effectiveRelationCadenceMs))
+
+            HorizontalDivider()
+            Text("CPU optical-flow tracker", style = MaterialTheme.typography.labelLarge)
+            MetricLine("Mode", if (state.cpuHybridEnabled) "OpenCV KLT · CPU" else "disabled")
+            MetricLine("Tracking update", formatMs(state.cpuTrackingMetrics.processingMs))
+            MetricLine("Tracked objects", state.cpuTrackingMetrics.trackedObjects.toString())
+            MetricLine("Feature points", state.cpuTrackingMetrics.trackedPoints.toString())
+            MetricLine("CPU flow updates", state.cpuTrackingMetrics.updates.toString())
+
+            MetricsBlock("Detector AI", state.detectorMetrics)
             HorizontalDivider()
             Text("Detector benchmark", style = MaterialTheme.typography.labelLarge)
             MetricLine("Active model", state.detectorProfile.displayName)
@@ -555,7 +565,7 @@ private fun PerformanceCard(state: CctvAiUiState) {
                 "Small 640 last",
                 state.smallLastInferenceMs?.let(::formatMs) ?: "not tested",
             )
-            MetricsBlock("Relation", state.relationMetrics)
+            MetricsBlock("Relation AI", state.relationMetrics)
         }
     }
 }
