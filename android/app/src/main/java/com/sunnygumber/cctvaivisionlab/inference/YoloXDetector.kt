@@ -15,6 +15,7 @@ import kotlin.math.min
 
 class YoloXDetector(
     modelFile: File,
+    private val inputSize: Int = 640,
     preferNnapi: Boolean = true,
 ) : Detector {
     private val runtime = OrtRuntimeFactory.createSession(modelFile, preferNnapi)
@@ -23,13 +24,13 @@ class YoloXDetector(
 
     override suspend fun detect(frame: FrameData, confidenceThreshold: Float): DetectionResult {
         val preprocessStart = SystemClock.elapsedRealtimeNanos()
-        val preprocessed = ImagePreprocessor.yoloX(frame, INPUT_SIZE)
+        val preprocessed = ImagePreprocessor.yoloX(frame, inputSize)
         val preprocessingMs = elapsedMs(preprocessStart)
 
         val inputTensor = OnnxTensor.createTensor(
             environment,
             preprocessed.data,
-            longArrayOf(1, 3, INPUT_SIZE.toLong(), INPUT_SIZE.toLong()),
+            longArrayOf(1, 3, inputSize.toLong(), inputSize.toLong()),
         )
 
         val inferenceStart = SystemClock.elapsedRealtimeNanos()
@@ -133,7 +134,6 @@ class YoloXDetector(
     }
 
     companion object {
-        const val INPUT_SIZE = 640
         private const val IOU_THRESHOLD = 0.65f
         private const val MAX_DETECTIONS = 40
 
