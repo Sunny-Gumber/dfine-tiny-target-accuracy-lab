@@ -23,7 +23,7 @@ interface Tracker {
 }
 
 interface FrameScheduler {
-    fun shouldRunDetector(timestampNs: Long): Boolean
+    fun shouldRunDetector(timestampNs: Long, detectorCadenceMs: Long = 0L): Boolean
     fun shouldRunRelation(timestampNs: Long, relationCadenceMs: Long): Boolean
     fun markDetectorStarted(timestampNs: Long)
     fun markDetectorFinished(timestampNs: Long)
