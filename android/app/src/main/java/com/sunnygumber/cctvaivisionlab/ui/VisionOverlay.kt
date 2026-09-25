@@ -79,7 +79,7 @@ fun VisionOverlay(
                         anchor.x + 6f,
                         anchor.y - 8f,
                         Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                            color = android.graphics.Color.WHITE
+                            this.color = android.graphics.Color.WHITE
                             textSize = 22f
                             style = Paint.Style.FILL
                             setShadowLayer(4f, 1f, 1f, android.graphics.Color.BLACK)
@@ -128,7 +128,7 @@ fun VisionOverlay(
                 middle.x,
                 middle.y,
                 Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = android.graphics.Color.rgb(255, 210, 173)
+                    this.color = android.graphics.Color.rgb(255, 210, 173)
                     textSize = 28f
                     style = Paint.Style.FILL
                     setShadowLayer(5f, 1f, 1f, android.graphics.Color.BLACK)
@@ -149,7 +149,7 @@ fun VisionOverlay(
                 location.x + 10f,
                 location.y - 10f,
                 Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = android.graphics.Color.WHITE
+                    this.color = android.graphics.Color.WHITE
                     textSize = 24f
                     style = Paint.Style.FILL
                     setShadowLayer(4f, 1f, 1f, android.graphics.Color.BLACK)
