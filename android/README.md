@@ -1,4 +1,4 @@
-# CCTV AI Vision Lab — Native Android
+# CCTV AI Vision Lab — Native Android v0.3
 
 The Android application is a native implementation of the browser CCTV AI lab. It uses CameraX for live capture and ONNX Runtime Android for local inference.
 
@@ -8,7 +8,7 @@ The Android application is a native implementation of the browser CCTV AI lab. I
 CameraX / selected image
         |
         v
-YOLOX-S 640x640
+YOLOX Nano 416 OR YOLOX Small 640
 NNAPI first -> CPU fallback
         |
         v
@@ -18,7 +18,7 @@ duplicate suppression
 IoU tracking
         |
         v
-stable top-8 objects
+stable, person-prioritized top-5 objects
         |
         v
 RelateAnything 448x448
@@ -39,7 +39,8 @@ Model weights are **not bundled in the APK**.
 
 The application downloads them into app-private storage when needed:
 
-- YOLOX-S detector: downloaded on first app use
+- YOLOX Small 640 detector: retained as the accuracy baseline
+- YOLOX Nano 416 detector: downloaded only when selected for the speed benchmark
 - RelateAnything: downloaded lazily when Scene AI is enabled
 - RelateAnything predicate bank: downloaded with the relation model
 
@@ -69,14 +70,20 @@ Qualcomm QNN is intentionally outside V1.
 - image import
 - detector confidence control
 - relationship confidence control
-- 1.0 / 1.5 / 3.0 second relationship cadence
+- 1.0 / 1.5 / 3.0 second requested relationship cadence with adaptive self-throttling
 - all-object or human+vehicle display filter
 - debug detector-box toggle
 - duplicate suppression
-- stable short-lived track IDs
+- motion-aware low-FPS tracking with center-distance fallback
+- semantic relation filtering (for example, impossible "Person wearing Chair" output is removed)
+- maximum three validated relationship overlays
+- person-prioritized top-5 relation candidates
 - clean Scene AI overlay
 - local model/download status
 - detector/relation provider and timing metrics
+- on-device detector benchmark selector: YOLOX Nano 416 vs YOLOX Small 640
+- last inference time retained for each detector during the current app session
+- effective adaptive relation cadence shown in the UI
 - manual model clear/re-download
 
 ## Build
@@ -102,12 +109,15 @@ GitHub Actions also uploads the APK as the **cctv-ai-vision-lab-debug** artifact
 A successful CI build proves the Android project compiles, but it cannot validate a phone GPU/NPU. On a physical Android device verify:
 
 1. Grant camera permission.
-2. Wait for YOLOX-S to show READY.
+2. Wait for the selected detector to show READY.
 3. Start live camera and confirm detections.
 4. Check Detector Runtime: NNAPI or CPU.
-5. Enable Scene AI and wait for RelateAnything + predicate bank to become READY.
-6. Check Relation Runtime and relation inference time.
-7. Close the app, disable network, reopen it, and confirm the local models remain READY.
-8. Run live AI for at least 10 minutes and observe latency/thermal behavior.
+5. Keep the camera on the same scene, run YOLOX Small 640 for several frames, then switch to Fast Nano 416 and compare the "last inference" values.
+6. Confirm a stable person/chair keeps the same track IDs for substantially longer than v0.2.
+7. Enable Scene AI and wait for RelateAnything + predicate bank to become READY.
+8. Check Relation Runtime, relation inference time, relation candidate count, and effective cadence.
+9. Confirm implausible relations such as "Person wearing Chair" are not shown.
+10. Close the app, disable network, reopen it, and confirm the local models remain READY.
+11. Run live AI for at least 10 minutes and observe latency/thermal behavior.
 
 See the repository-level `ANDROID_APP_PLAN.md` for complete acceptance criteria.
