@@ -13,6 +13,7 @@ import com.sunnygumber.cctvaivisionlab.core.DefaultFrameScheduler
 import com.sunnygumber.cctvaivisionlab.core.Detection
 import com.sunnygumber.cctvaivisionlab.core.FrameData
 import com.sunnygumber.cctvaivisionlab.core.InferenceMetrics
+import com.sunnygumber.cctvaivisionlab.core.ModelDescriptor
 import com.sunnygumber.cctvaivisionlab.core.ModelState
 import com.sunnygumber.cctvaivisionlab.core.ModelStatus
 import com.sunnygumber.cctvaivisionlab.core.SceneRelation
@@ -21,6 +22,7 @@ import com.sunnygumber.cctvaivisionlab.inference.YoloXDetector
 import com.sunnygumber.cctvaivisionlab.models.LocalModelManager
 import com.sunnygumber.cctvaivisionlab.models.ModelCatalog
 import com.sunnygumber.cctvaivisionlab.tracking.IoUTracker
+import com.sunnygumber.cctvaivisionlab.tracking.RelationPolicy
 import com.sunnygumber.cctvaivisionlab.tracking.RelationSmoother
 import com.sunnygumber.cctvaivisionlab.tracking.deduplicateDetections
 import kotlinx.coroutines.Dispatchers
@@ -30,7 +32,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.ceil
+import kotlin.math.hypot
+import kotlin.math.max
 
 enum class SourceMode {
     CAMERA,
@@ -42,6 +49,14 @@ enum class DisplayFilter {
     HUMAN_VEHICLE,
 }
 
+enum class DetectorProfile(
+    val displayName: String,
+    val inputSize: Int,
+) {
+    FAST_NANO("YOLOX Nano · 416", 416),
+    ACCURATE_SMALL("YOLOX Small · 640", 640),
+}
+
 data class CctvAiUiState(
     val sourceMode: SourceMode = SourceMode.CAMERA,
     val lensFacing: Int = CameraSelector.LENS_FACING_BACK,
@@ -49,16 +64,23 @@ data class CctvAiUiState(
     val sceneEnabled: Boolean = false,
     val debugOverlay: Boolean = false,
     val displayFilter: DisplayFilter = DisplayFilter.ALL,
-    val detectorThreshold: Float = 0.60f,
-    val relationThreshold: Float = 0.56f,
-    val relationCadenceMs: Long = 1_500L,
+    val detectorProfile: DetectorProfile = DetectorProfile.ACCURATE_SMALL,
+    val detectorThreshold: Float = 0.55f,
+    val relationThreshold: Float = 0.55f,
+    val relationCadenceMs: Long = 3_000L,
+    val effectiveRelationCadenceMs: Long = 3_000L,
     val detections: List<Detection> = emptyList(),
     val relations: List<SceneRelation> = emptyList(),
+    val relationCandidateCount: Int = 0,
     val activeTracks: Int = 0,
     val relationUpdates: Int = 0,
     val detectorMetrics: InferenceMetrics? = null,
     val relationMetrics: InferenceMetrics? = null,
+    val nanoLastInferenceMs: Double? = null,
+    val smallLastInferenceMs: Double? = null,
     val detectorModel: ModelStatus? = null,
+    val nanoModel: ModelStatus? = null,
+    val smallModel: ModelStatus? = null,
     val relationModel: ModelStatus? = null,
     val predicateBank: ModelStatus? = null,
     val frameWidth: Int = 0,
@@ -73,7 +95,10 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
     private val tracker = IoUTracker()
     private val smoother = RelationSmoother()
     private val scheduler = DefaultFrameScheduler()
+    private val detectorMutex = Mutex()
+    private val detectorGeneration = AtomicInteger(0)
 
+    @Volatile
     private var detector: YoloXDetector? = null
     private var relationEngine: RelateAnythingEngine? = null
     private var currentRelations: List<SceneRelation> = emptyList()
@@ -82,7 +107,7 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
     val state: StateFlow<CctvAiUiState> = _state.asStateFlow()
 
     init {
-        prepareDetector()
+        prepareDetector(_state.value.detectorProfile)
         refreshModelStates()
     }
 
@@ -98,6 +123,18 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
         }
         resetLiveState()
         _state.value = _state.value.copy(lensFacing = next)
+    }
+
+    fun setDetectorProfile(profile: DetectorProfile) {
+        if (_state.value.detectorProfile == profile) return
+        resetLiveState()
+        _state.value = _state.value.copy(
+            detectorProfile = profile,
+            detectorModel = null,
+            status = "Preparing ${profile.displayName}…",
+            error = null,
+        )
+        prepareDetector(profile)
     }
 
     fun setAiEnabled(enabled: Boolean) {
@@ -118,6 +155,7 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
             _state.value = _state.value.copy(
                 sceneEnabled = false,
                 relations = emptyList(),
+                relationCandidateCount = 0,
                 relationUpdates = 0,
                 status = "Object AI active.",
             )
@@ -150,7 +188,15 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun setRelationCadence(valueMs: Long) {
-        _state.value = _state.value.copy(relationCadenceMs = valueMs)
+        val snapshot = _state.value
+        _state.value = snapshot.copy(
+            relationCadenceMs = valueMs,
+            effectiveRelationCadenceMs = calculateEffectiveCadence(
+                requestedMs = valueMs,
+                detectorMetrics = snapshot.detectorMetrics,
+                relationMetrics = snapshot.relationMetrics,
+            ),
+        )
     }
 
     fun onCameraImage(image: ImageProxy, mirrored: Boolean) {
@@ -198,65 +244,114 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
 
     fun clearAndRedownloadModels() {
         resetLiveState()
+        detectorGeneration.incrementAndGet()
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { detector?.close() }
+            detectorMutex.withLock {
+                runCatching { detector?.close() }
+                detector = null
+            }
             runCatching { relationEngine?.close() }
-            detector = null
             relationEngine = null
             ModelCatalog.all.forEach { modelManager.clear(it) }
             _state.value = _state.value.copy(
                 detectorModel = null,
+                nanoModel = null,
+                smallModel = null,
                 relationModel = null,
                 predicateBank = null,
                 relationMetrics = null,
                 detectorMetrics = null,
-                status = "Local AI models cleared. Downloading detector again…",
+                nanoLastInferenceMs = null,
+                smallLastInferenceMs = null,
+                status = "Local AI models cleared. Downloading active detector again…",
                 error = null,
             )
-            prepareDetector()
+            prepareDetector(_state.value.detectorProfile)
             if (_state.value.sceneEnabled) prepareRelationEngine()
         }
     }
 
     fun refreshModelStates() {
         viewModelScope.launch(Dispatchers.IO) {
-            val detectorStatus = modelManager.status(ModelCatalog.yoloXSmall)
+            val nanoStatus = modelManager.status(ModelCatalog.yoloXNano)
+            val smallStatus = modelManager.status(ModelCatalog.yoloXSmall)
             val relationStatus = modelManager.status(ModelCatalog.relateAnything)
             val bankStatus = modelManager.status(ModelCatalog.predicateBank)
+            val active = if (_state.value.detectorProfile == DetectorProfile.FAST_NANO) {
+                nanoStatus
+            } else {
+                smallStatus
+            }
             _state.value = _state.value.copy(
-                detectorModel = detectorStatus,
+                detectorModel = active,
+                nanoModel = nanoStatus,
+                smallModel = smallStatus,
                 relationModel = relationStatus,
                 predicateBank = bankStatus,
             )
         }
     }
 
-    private fun prepareDetector() {
-        if (detector != null) return
+    private fun prepareDetector(profile: DetectorProfile) {
+        val generation = detectorGeneration.incrementAndGet()
+        val descriptor = detectorDescriptor(profile)
 
         viewModelScope.launch(Dispatchers.IO) {
-            val status = modelManager.ensureAvailable(ModelCatalog.yoloXSmall) { progress ->
+            detectorMutex.withLock {
+                runCatching { detector?.close() }
+                detector = null
+            }
+
+            val status = modelManager.ensureAvailable(descriptor) { progress ->
+                updateDetectorModelStatus(profile, progress)
                 _state.value = _state.value.copy(
-                    detectorModel = progress,
-                    status = modelMessage("YOLOX-S", progress),
+                    status = modelMessage(profile.displayName, progress),
                 )
             }
 
+            if (generation != detectorGeneration.get()) return@launch
+
             if (status.state != ModelState.READY || status.localFile == null) {
-                setError(status.error ?: "YOLOX-S model could not be prepared.")
+                setError(status.error ?: "${profile.displayName} could not be prepared.")
                 return@launch
             }
 
             try {
-                detector = YoloXDetector(status.localFile, preferNnapi = true)
+                val newDetector = YoloXDetector(
+                    modelFile = status.localFile,
+                    inputSize = profile.inputSize,
+                    preferNnapi = true,
+                )
+                if (generation != detectorGeneration.get()) {
+                    newDetector.close()
+                    return@launch
+                }
+
+                detectorMutex.withLock {
+                    detector = newDetector
+                }
+                updateDetectorModelStatus(profile, status)
                 _state.value = _state.value.copy(
                     detectorModel = status,
-                    status = "YOLOX-S ready. Camera AI can start.",
+                    status = "${profile.displayName} ready.",
                     error = null,
                 )
             } catch (error: Throwable) {
-                setError("Could not initialize YOLOX-S: ${error.message}")
+                setError("Could not initialize ${profile.displayName}: ${error.message}")
             }
+        }
+    }
+
+    private fun updateDetectorModelStatus(profile: DetectorProfile, status: ModelStatus) {
+        _state.value = when (profile) {
+            DetectorProfile.FAST_NANO -> _state.value.copy(
+                detectorModel = if (_state.value.detectorProfile == profile) status else _state.value.detectorModel,
+                nanoModel = status,
+            )
+            DetectorProfile.ACCURATE_SMALL -> _state.value.copy(
+                detectorModel = if (_state.value.detectorProfile == profile) status else _state.value.detectorModel,
+                smallModel = status,
+            )
         }
     }
 
@@ -309,18 +404,15 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private suspend fun processFrame(frame: FrameData, live: Boolean) {
-        val localDetector = detector
-        if (localDetector == null) {
-            if (live) scheduler.markDetectorFinished(frame.timestampNs)
-            return
-        }
-
         var relationCandidates: List<Detection> = emptyList()
         var runRelation = false
 
         try {
             val snapshot = _state.value
-            val detectionResult = localDetector.detect(frame, snapshot.detectorThreshold)
+            val detectionResult = detectorMutex.withLock {
+                detector?.detect(frame, snapshot.detectorThreshold)
+            } ?: return
+
             val deduplicated = deduplicateDetections(detectionResult.detections)
             val tracked = if (live) tracker.update(deduplicated) else deduplicated
 
@@ -328,11 +420,26 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
                 currentRelations = smoother.resolveBoxes(currentRelations, tracked)
             }
 
-            _state.value = _state.value.copy(
+            val effectiveCadence = calculateEffectiveCadence(
+                requestedMs = snapshot.relationCadenceMs,
+                detectorMetrics = detectionResult.metrics,
+                relationMetrics = snapshot.relationMetrics,
+            )
+            val benchmarkState = when (snapshot.detectorProfile) {
+                DetectorProfile.FAST_NANO -> snapshot.copy(
+                    nanoLastInferenceMs = detectionResult.metrics.inferenceMs,
+                )
+                DetectorProfile.ACCURATE_SMALL -> snapshot.copy(
+                    smallLastInferenceMs = detectionResult.metrics.inferenceMs,
+                )
+            }
+
+            _state.value = benchmarkState.copy(
                 detections = tracked,
                 relations = currentRelations,
                 activeTracks = if (live) tracker.activeTrackCount else 0,
                 detectorMetrics = detectionResult.metrics,
+                effectiveRelationCadenceMs = effectiveCadence,
                 frameWidth = frame.width,
                 frameHeight = frame.height,
                 status = if (snapshot.sceneEnabled) "Live Scene AI active." else "Object AI active.",
@@ -341,18 +448,17 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
 
             val relation = relationEngine
             if (snapshot.sceneEnabled && relation != null) {
-                relationCandidates = if (live) {
-                    tracked.filter { it.trackAge >= 2 }
-                } else {
-                    tracked
-                }.sortedByDescending { it.confidence }.take(8)
+                relationCandidates = selectRelationCandidates(tracked, live)
+                _state.value = _state.value.copy(relationCandidateCount = relationCandidates.size)
 
                 if (relationCandidates.size >= 2) {
-                    if (!live || scheduler.shouldRunRelation(frame.timestampNs, snapshot.relationCadenceMs)) {
+                    if (!live || scheduler.shouldRunRelation(frame.timestampNs, effectiveCadence)) {
                         if (live) scheduler.markRelationStarted(frame.timestampNs)
                         runRelation = true
                     }
                 }
+            } else {
+                _state.value = _state.value.copy(relationCandidateCount = 0)
             }
         } catch (error: Throwable) {
             setError("Detector inference failed: ${error.message}")
@@ -367,27 +473,40 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
             if (live) scheduler.markRelationFinished(System.nanoTime())
             return
         }
+
         try {
             val relationResult = relation.analyse(
                 frame = frame,
                 detections = relationCandidates,
                 confidenceThreshold = _state.value.relationThreshold,
             )
+            val plausible = RelationPolicy.filterAndRank(
+                relations = relationResult.relations,
+                maxRelations = 3,
+            )
             val stable = if (live) {
-                smoother.update(relationResult.relations)
+                smoother.update(plausible)
             } else {
-                relationResult.relations
+                plausible
             }
+
             if (!live || _state.value.sceneEnabled) {
                 currentRelations = stable
-                _state.value = _state.value.copy(
+                val snapshot = _state.value
+                val effectiveCadence = calculateEffectiveCadence(
+                    requestedMs = snapshot.relationCadenceMs,
+                    detectorMetrics = snapshot.detectorMetrics,
+                    relationMetrics = relationResult.metrics,
+                )
+                _state.value = snapshot.copy(
                     relations = stable,
                     relationMetrics = relationResult.metrics,
-                    relationUpdates = _state.value.relationUpdates + 1,
+                    effectiveRelationCadenceMs = effectiveCadence,
+                    relationUpdates = snapshot.relationUpdates + 1,
                     status = if (stable.isEmpty()) {
-                        "Scene AI active · no relationship crossed the threshold."
+                        "Scene AI active · no plausible relationship crossed the threshold."
                     } else {
-                        "Scene AI active · ${stable.size} relationship(s)."
+                        "Scene AI active · ${stable.size} validated relationship(s)."
                     },
                     error = null,
                 )
@@ -399,18 +518,83 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    private fun selectRelationCandidates(
+        detections: List<Detection>,
+        live: Boolean,
+    ): List<Detection> {
+        val eligible = (if (live) detections.filter { it.trackAge >= 2 } else detections)
+            .sortedByDescending { it.confidence }
+
+        if (eligible.size <= MAX_RELATION_CANDIDATES) return eligible
+
+        val persons = eligible.filter { it.classId == 0 }.take(3)
+        if (persons.isEmpty()) return eligible.take(MAX_RELATION_CANDIDATES)
+
+        val personIds = persons.mapNotNull { it.trackId }.toSet()
+        val others = eligible
+            .filter { candidate ->
+                candidate.classId != 0 || candidate.trackId !in personIds
+            }
+            .sortedWith(
+                compareBy<Detection> { candidate ->
+                    persons.minOf { person ->
+                        normalizedCenterDistance(person, candidate)
+                    }
+                }.thenByDescending { it.confidence },
+            )
+
+        return (persons + others)
+            .distinctBy { it.trackId ?: ((it.classId + 1) * 100_000 + it.box.centerX.toInt()) }
+            .take(MAX_RELATION_CANDIDATES)
+    }
+
+    private fun normalizedCenterDistance(a: Detection, b: Detection): Double {
+        val distance = hypot(
+            (a.box.centerX - b.box.centerX).toDouble(),
+            (a.box.centerY - b.box.centerY).toDouble(),
+        )
+        val scale = max(
+            max(a.box.width, a.box.height),
+            max(b.box.width, b.box.height),
+        ).coerceAtLeast(1f)
+        return distance / scale
+    }
+
+    private fun calculateEffectiveCadence(
+        requestedMs: Long,
+        detectorMetrics: InferenceMetrics?,
+        relationMetrics: InferenceMetrics?,
+    ): Long {
+        if (detectorMetrics == null || relationMetrics == null) return requestedMs
+
+        val cycleMs = totalMs(detectorMetrics) + totalMs(relationMetrics) + SCHEDULER_HEADROOM_MS
+        val rounded = ceil(cycleMs / 500.0).toLong() * 500L
+        return max(requestedMs, rounded).coerceAtMost(10_000L)
+    }
+
+    private fun totalMs(metrics: InferenceMetrics): Double =
+        metrics.preprocessingMs + metrics.inferenceMs + metrics.postprocessingMs
+
+    private fun detectorDescriptor(profile: DetectorProfile): ModelDescriptor = when (profile) {
+        DetectorProfile.FAST_NANO -> ModelCatalog.yoloXNano
+        DetectorProfile.ACCURATE_SMALL -> ModelCatalog.yoloXSmall
+    }
+
     private fun resetLiveState() {
         scheduler.reset()
         tracker.reset()
         smoother.reset()
         currentRelations = emptyList()
-        _state.value = _state.value.copy(
+        val snapshot = _state.value
+        _state.value = snapshot.copy(
             detections = emptyList(),
             relations = emptyList(),
+            relationCandidateCount = 0,
             activeTracks = 0,
             relationUpdates = 0,
             detectorMetrics = null,
             relationMetrics = null,
+            effectiveRelationCadenceMs = snapshot.relationCadenceMs,
         )
     }
 
@@ -430,10 +614,19 @@ class CctvAiViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     override fun onCleared() {
+        detectorGeneration.incrementAndGet()
         runBlocking(Dispatchers.IO) {
-            runCatching { detector?.close() }
+            detectorMutex.withLock {
+                runCatching { detector?.close() }
+                detector = null
+            }
             runCatching { relationEngine?.close() }
         }
         super.onCleared()
+    }
+
+    companion object {
+        private const val MAX_RELATION_CANDIDATES = 5
+        private const val SCHEDULER_HEADROOM_MS = 250.0
     }
 }
