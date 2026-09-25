@@ -446,6 +446,90 @@ private fun VisionSurface(
 }
 
 @Composable
+private fun MetricCalibrationCard(
+    state: CctvAiUiState,
+    setWidth: (Float) -> Unit,
+    setDepth: (Float) -> Unit,
+    startCalibration: () -> Unit,
+    clearCalibration: () -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Single-camera metric localization", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "For a fixed CCTV camera, map the ground plane to meters using one known rectangular area. " +
+                    "This calibration is CPU-only and must be repeated if the camera position changes.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+
+            MeterSlider(
+                label = "Known ground width",
+                value = state.metricGroundWidthMeters,
+                onValueChange = setWidth,
+                range = 1f..20f,
+            )
+            MeterSlider(
+                label = "Known ground depth",
+                value = state.metricGroundDepthMeters,
+                onValueChange = setDepth,
+                range = 1f..30f,
+            )
+
+            if (state.metricCalibrationMode) {
+                Text(
+                    "Tap ground corners on the video in this order: top-left → top-right → bottom-right → bottom-left. " +
+                        "Saved: ${state.metricCalibrationPoints.size}/4",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                OutlinedButton(
+                    onClick = clearCalibration,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Cancel calibration")
+                }
+            } else {
+                Button(
+                    onClick = startCalibration,
+                    enabled = state.sourceMode == SourceMode.CAMERA,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (state.metricReady) "Recalibrate metric ground plane" else "Start 4-point calibration")
+                }
+            }
+
+            MetricLine(
+                "Metric state",
+                if (state.metricReady) "READY" else if (state.metricCalibrationMode) "CALIBRATING" else "not calibrated",
+            )
+
+            if (state.metricReady) {
+                if (state.metricTracks.isEmpty()) {
+                    Text("Waiting for tracked objects on the calibrated ground plane.")
+                } else {
+                    state.metricTracks.take(6).forEach { track ->
+                        Text(
+                            String.format(
+                                Locale.US,
+                                "#%d %s · x %.2fm · y %.2fm · %.2fm/s",
+                                track.trackId,
+                                track.label,
+                                track.xMeters,
+                                track.yMeters,
+                                track.speedMetersPerSecond,
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun PerformanceCard(state: CctvAiUiState) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
