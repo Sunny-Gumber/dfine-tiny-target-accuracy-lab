@@ -361,12 +361,45 @@ private fun VisionSurface(
     cameraGranted: Boolean,
     requestCamera: () -> Unit,
     onImage: (androidx.camera.core.ImageProxy, Boolean) -> Unit,
+    onCalibrationTap: (FramePoint) -> Unit,
 ) {
+    val calibrationModifier = if (
+        state.metricCalibrationMode &&
+        state.frameWidth > 0 &&
+        state.frameHeight > 0
+    ) {
+        Modifier.pointerInput(
+            state.metricCalibrationMode,
+            state.frameWidth,
+            state.frameHeight,
+        ) {
+            detectTapGestures { tap ->
+                val frameWidth = state.frameWidth.toFloat()
+                val frameHeight = state.frameHeight.toFloat()
+                val scale = min(
+                    size.width.toFloat() / frameWidth,
+                    size.height.toFloat() / frameHeight,
+                )
+                val offsetX = (size.width - frameWidth * scale) / 2f
+                val offsetY = (size.height - frameHeight * scale) / 2f
+                val frameX = (tap.x - offsetX) / scale
+                val frameY = (tap.y - offsetY) / scale
+
+                if (frameX in 0f..frameWidth && frameY in 0f..frameHeight) {
+                    onCalibrationTap(FramePoint(frameX, frameY))
+                }
+            }
+        }
+    } else {
+        Modifier
+    }
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .aspectRatio(16f / 9f)
-            .background(Color.Black),
+            .background(Color.Black)
+            .then(calibrationModifier),
         contentAlignment = Alignment.Center,
     ) {
         when (state.sourceMode) {
@@ -404,7 +437,9 @@ private fun VisionSurface(
             frameHeight = state.frameHeight,
             detections = detections,
             relations = state.relations,
-            showDetections = state.debugOverlay || !state.sceneEnabled,
+            showDetections = state.debugOverlay || !state.sceneEnabled || state.metricReady,
+            calibrationPoints = state.metricCalibrationPoints,
+            metricTracks = state.metricTracks,
             modifier = Modifier.fillMaxSize(),
         )
     }
