@@ -321,7 +321,7 @@ class RelateAnythingEngine(
     companion object {
         private const val MODEL_SIZE = 448
         private const val MAX_BOXES = 32
-        private const val MAX_RELATION_OBJECTS = 8
+        private const val MAX_RELATION_OBJECTS = 5
         private const val TEXT_DIM = 512
         private const val CALIBRATION_A = 0.5651f
         private const val CALIBRATION_B = -1.9623f
