@@ -41,4 +41,24 @@ class TrackingTest {
         assertEquals(first.trackId, second.trackId)
         assertEquals(2, second.trackAge)
     }
+
+    @Test
+    fun keepsTrackIdAcrossLargeLowFpsMovement() {
+        val tracker = IoUTracker()
+        val first = tracker.update(listOf(detection(0f, 0f, 100f, 100f, 0.9f))).single()
+        val second = tracker.update(listOf(detection(60f, 0f, 160f, 100f, 0.87f))).single()
+
+        assertEquals(first.trackId, second.trackId)
+        assertEquals(2, second.trackAge)
+    }
+
+    @Test
+    fun recoversTrackAfterSingleMiss() {
+        val tracker = IoUTracker()
+        val first = tracker.update(listOf(detection(0f, 0f, 100f, 100f, 0.9f))).single()
+        tracker.update(emptyList())
+        val recovered = tracker.update(listOf(detection(55f, 0f, 155f, 100f, 0.86f))).single()
+
+        assertEquals(first.trackId, recovered.trackId)
+    }
 }
