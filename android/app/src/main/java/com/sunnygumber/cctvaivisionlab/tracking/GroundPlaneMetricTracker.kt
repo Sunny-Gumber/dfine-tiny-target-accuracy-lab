@@ -29,6 +29,7 @@ class GroundPlaneMetricTracker : AutoCloseable {
     val isCalibrated: Boolean
         get() = homography != null
 
+    @Synchronized
     fun configure(
         imagePoints: List<FramePoint>,
         widthMeters: Double,
@@ -63,16 +64,19 @@ class GroundPlaneMetricTracker : AutoCloseable {
         previous.clear()
     }
 
+    @Synchronized
     fun resetMotion() {
         previous.clear()
     }
 
+    @Synchronized
     fun clear() {
         homography?.release()
         homography = null
         previous.clear()
     }
 
+    @Synchronized
     fun update(
         detections: List<Detection>,
         timestampNs: Long,
